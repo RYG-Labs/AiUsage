@@ -128,7 +128,9 @@ final class UsageStore: ObservableObject {
                 if case .rateLimited = e as? WidgetError {
                     claudeBackoff = min(900, max(120, claudeBackoff * 2))
                     claudeNextAttempt = Date().addingTimeInterval(claudeBackoff)
-                    error = "Claude API tạm giới hạn tần suất — hiển thị số cũ, thử lại sau \(Int(claudeBackoff / 60)) phút"
+                    let mins = Int(claudeBackoff / 60)
+                    error = L.t("Claude API tạm giới hạn tần suất — hiển thị số cũ, thử lại sau \(mins) phút",
+                                 "Claude API is rate-limited — showing last known numbers, retrying in \(mins) min")
                 } else {
                     error = (e as? WidgetError)?.text ?? e.localizedDescription
                 }
@@ -149,7 +151,7 @@ final class UsageStore: ObservableObject {
         var text: String {
             switch self {
             case .msg(let s): return s
-            case .rateLimited: return "Bị giới hạn tần suất (HTTP 429)"
+            case .rateLimited: return L.t("Bị giới hạn tần suất (HTTP 429)", "Rate-limited (HTTP 429)")
             }
         }
     }
@@ -178,7 +180,8 @@ final class UsageStore: ObservableObject {
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 {
-            throw WidgetError.msg("Token hết hạn — mở Claude Code một lần để làm mới")
+            throw WidgetError.msg(L.t("Token hết hạn — mở Claude Code một lần để làm mới",
+                                       "Token expired — open Claude Code once to refresh it"))
         }
         if code == 429 { throw WidgetError.rateLimited }
         guard code == 200 else { throw WidgetError.msg("Claude: HTTP \(code)") }
@@ -203,28 +206,43 @@ final class UsageStore: ObservableObject {
     /// Querying via the Security framework directly lets us fetch every match and pick
     /// the one most recently written, so a newly logged-in account is picked up right away.
     nonisolated static func readClaudeToken() throws -> String {
-        let query: [String: Any] = [
+        // Step 1: list every matching item's attributes only (no secret material,
+        // so this never needs a Keychain access prompt) to find the newest one.
+        let listQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
             kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnData as String: true,
             kSecReturnAttributes as String: true,
+            kSecReturnPersistentRef as String: true,
         ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let items = result as? [[String: Any]], !items.isEmpty
-        else { throw WidgetError.msg("Không đọc được token Claude Code trong Keychain") }
+        let keychainError = L.t("Không đọc được token Claude Code trong Keychain",
+                                 "Couldn't read the Claude Code token from the Keychain")
+        var listResult: CFTypeRef?
+        let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listResult)
+        guard listStatus == errSecSuccess, let items = listResult as? [[String: Any]], !items.isEmpty
+        else { throw WidgetError.msg(keychainError) }
 
         let newest = items.max { a, b in
             let da = a[kSecAttrModificationDate as String] as? Date ?? .distantPast
             let db = b[kSecAttrModificationDate as String] as? Date ?? .distantPast
             return da < db
         }
-        guard let data = newest?[kSecValueData as String] as? Data,
+        guard let ref = newest?[kSecValuePersistentRef as String]
+        else { throw WidgetError.msg(keychainError) }
+
+        // Step 2: fetch the secret for that one item only — a single-item fetch can
+        // still trigger the normal (one-time) Keychain access prompt, unlike a batch fetch.
+        let itemQuery: [String: Any] = [
+            kSecValuePersistentRef as String: ref,
+            kSecReturnData as String: true,
+        ]
+        var itemResult: CFTypeRef?
+        let itemStatus = SecItemCopyMatching(itemQuery as CFDictionary, &itemResult)
+        guard itemStatus == errSecSuccess, let data = itemResult as? Data,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String
-        else { throw WidgetError.msg("Không đọc được token Claude Code trong Keychain") }
+        else { throw WidgetError.msg(keychainError) }
         return token
     }
 
@@ -242,7 +260,7 @@ final class UsageStore: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty
         else { return [] }
         guard let userId = jwtUserId(token) else {
-            throw WidgetError.msg("Cursor: token không hợp lệ")
+            throw WidgetError.msg(L.t("Cursor: token không hợp lệ", "Cursor: invalid token"))
         }
         let cookie = "WorkosCursorSessionToken=\(userId)%3A%3A\(token)"
 
@@ -256,7 +274,8 @@ final class UsageStore: ObservableObject {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401 || code == 403 {
-                throw WidgetError.msg("Cursor: phiên đăng nhập hết hạn — mở Cursor để đăng nhập lại")
+                throw WidgetError.msg(L.t("Cursor: phiên đăng nhập hết hạn — mở Cursor để đăng nhập lại",
+                                           "Cursor: session expired — open Cursor to log in again"))
             }
             guard code == 200, let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { throw WidgetError.msg("Cursor: HTTP \(code)") }
@@ -273,7 +292,8 @@ final class UsageStore: ObservableObject {
             }()
             if let used {
                 let end = (summary["billingCycleEnd"] as? String).flatMap(parseDate)
-                return [Limit(kind: .cursor, title: "Cursor (chu kỳ tháng)", used: min(100, used), resetsAt: end)]
+                let title = L.t("Cursor (chu kỳ tháng)", "Cursor (monthly cycle)")
+                return [Limit(kind: .cursor, title: title, used: min(100, used), resetsAt: end)]
             }
         }
 
@@ -281,10 +301,11 @@ final class UsageStore: ObservableObject {
         let usage = try await get("https://cursor.com/api/usage?user=\(userId)")
         guard let gpt = usage["gpt-4"] as? [String: Any],
               let n = num(gpt["numRequests"]), let max = num(gpt["maxRequestUsage"]), max > 0
-        else { throw WidgetError.msg("Cursor: không đọc được dữ liệu usage") }
+        else { throw WidgetError.msg(L.t("Cursor: không đọc được dữ liệu usage", "Cursor: couldn't read usage data")) }
         let start = (usage["startOfMonth"] as? String).flatMap(parseDate)
         let end = start.flatMap { Calendar.current.date(byAdding: .month, value: 1, to: $0) }
-        return [Limit(kind: .cursor, title: "Cursor (\(Int(n))/\(Int(max)) request)", used: min(100, n / max * 100), resetsAt: end)]
+        let title = L.t("Cursor (\(Int(n))/\(Int(max)) request)", "Cursor (\(Int(n))/\(Int(max)) requests)")
+        return [Limit(kind: .cursor, title: title, used: min(100, n / max * 100), resetsAt: end)]
     }
 
     /// Cursor JWT `sub` looks like "auth0|user_XXXX"; the cookie needs the part after "|".
@@ -346,13 +367,43 @@ enum Pref {
     static let showCursor = "showCursor"
     static let showTasks = "showTasks"
     static let showTokens = "showTokens"
+    static let panelScreenID = "panelScreenID"
+    static let language = "language"
 }
+
+// MARK: - Localization
+
+enum Lang: String { case vi, en }
+
+/// App language, chosen from the settings menu — independent of the macOS system language.
+enum L {
+    static var current: Lang {
+        Lang(rawValue: UserDefaults.standard.string(forKey: Pref.language) ?? "vi") ?? .vi
+    }
+    static func t(_ vi: String, _ en: String) -> String { current == .vi ? vi : en }
+}
+
+extension LimitKind {
+    var localizedTitle: String {
+        switch self {
+        case .fiveHour: return L.t("Phiên 5 giờ", "5-hour session")
+        case .week: return L.t("Tuần (7 ngày)", "Weekly (7 days)")
+        case .opus: return L.t("Tuần — Opus", "Weekly — Opus")
+        case .sonnet: return L.t("Tuần — Sonnet", "Weekly — Sonnet")
+        case .cursor: return "Cursor"
+        }
+    }
+}
+
+/// Cursor's title carries dynamic, already-localized detail (billing cycle / request count)
+/// baked in at fetch time; the Claude kinds ignore the cached `title` and localize live.
+func displayTitle(_ l: Limit) -> String { l.kind == .cursor ? l.title : l.kind.localizedTitle }
 
 /// Absolute reset time in GMT+7, e.g. "21:10 T2 28/09 (GMT+7)".
 func resetClock(_ date: Date?) -> String {
     guard let date else { return "—" }
     let f = DateFormatter()
-    f.locale = Locale(identifier: "vi_VN")
+    f.locale = Locale(identifier: L.current == .vi ? "vi_VN" : "en_US")
     f.timeZone = TimeZone(secondsFromGMT: 7 * 3600)
     f.dateFormat = "HH:mm EEE dd/MM"
     return f.string(from: date) + " (GMT+7)"
@@ -361,11 +412,17 @@ func resetClock(_ date: Date?) -> String {
 func countdown(to date: Date?, now: Date = .now) -> String {
     guard let date else { return "—" }
     let s = Int(date.timeIntervalSince(now))
-    if s <= 0 { return "đang reset" }
+    if s <= 0 { return L.t("đang reset", "resetting") }
     let d = s / 86400, h = (s % 86400) / 3600, m = (s % 3600) / 60
-    if d > 0 { return "\(d)n \(h)g" }
-    if h > 0 { return "\(h)g \(m)p" }
-    return "\(m)p"
+    if L.current == .vi {
+        if d > 0 { return "\(d)n \(h)g" }
+        if h > 0 { return "\(h)g \(m)p" }
+        return "\(m)p"
+    } else {
+        if d > 0 { return "\(d)d \(h)h" }
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
 }
 
 /// Claude brand orange.
@@ -525,7 +582,10 @@ struct RingGauge: View {
                 .foregroundStyle(.white)
                 .frame(height: 11)
         }
-        .help("\(limit.title)\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\n(Bấm để mở cài đặt, kéo để di chuyển)")
+        .help(L.t(
+            "\(displayTitle(limit))\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\n(Bấm để mở cài đặt, kéo để di chuyển)",
+            "\(displayTitle(limit))\nUsed \(Int(limit.used.rounded()))% · \(Int(limit.remaining.rounded()))% left\nResets in \(countdown(to: limit.resetsAt)) — at \(resetClock(limit.resetsAt))\n(Click to open settings, drag to move)"
+        ))
     }
 }
 
@@ -735,7 +795,8 @@ struct TokenBadge: View {
                 .minimumScaleFactor(0.7)
         }
         .frame(width: 34, height: Layout.tokenBlock)
-        .help("""
+        .help(L.t(
+            """
             Token Claude Code hôm nay (máy này)
             Tổng: \(tokens.total.formatted())
             • Input: \(tokens.input.formatted())
@@ -743,7 +804,17 @@ struct TokenBadge: View {
             • Cache ghi: \(tokens.cacheWrite.formatted())
             • Cache đọc: \(tokens.cacheRead.formatted())
             \(tokens.messages) lượt trả lời
-            """)
+            """,
+            """
+            Claude Code tokens today (this machine)
+            Total: \(tokens.total.formatted())
+            • Input: \(tokens.input.formatted())
+            • Output: \(tokens.output.formatted())
+            • Cache write: \(tokens.cacheWrite.formatted())
+            • Cache read: \(tokens.cacheRead.formatted())
+            \(tokens.messages) replies
+            """
+        ))
     }
 }
 
@@ -765,8 +836,10 @@ struct TaskBadge: View {
         .frame(width: 28, height: Layout.badge)
         .background(Capsule().fill(active ? runningGreen : Color.white.opacity(0.14)))
         .help(active
-              ? "Claude Code đang chạy \(running.count) task:\n" + running.map { "• \($0.name)" }.joined(separator: "\n")
-              : "Không có task Claude Code nào đang chạy (\(store.sessions.count) phiên đang mở)")
+              ? L.t("Claude Code đang chạy \(running.count) task:\n", "Claude Code is running \(running.count) task(s):\n")
+                  + running.map { "• \($0.name)" }.joined(separator: "\n")
+              : L.t("Không có task Claude Code nào đang chạy (\(store.sessions.count) phiên đang mở)",
+                    "No Claude Code task is running (\(store.sessions.count) session(s) open)"))
     }
 }
 
@@ -777,6 +850,7 @@ struct SideWidgetView: View {
     @AppStorage(Pref.showRemaining) private var showRemaining = false
     @AppStorage(Pref.showTasks) private var showTasks = true
     @AppStorage(Pref.showTokens) private var showTokens = true
+    @AppStorage(Pref.language) private var langRaw = Lang.vi.rawValue
     @State private var dragStart: (mouseY: CGFloat, top: CGFloat)?
 
     var body: some View {
@@ -813,11 +887,11 @@ struct SideWidgetView: View {
                 }
             }
             .frame(width: Layout.ring, height: Layout.ring)
-            Text(store.error == nil ? "…" : "lỗi")
+            Text(store.error == nil ? "…" : L.t("lỗi", "error"))
                 .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
                 .frame(height: 11)
         }
-        .help(store.error ?? "Đang tải…")
+        .help(store.error ?? L.t("Đang tải…", "Loading…"))
     }
 
     /// Drag vertically to slide the tab along the screen edge.
@@ -859,21 +933,34 @@ enum SettingsMenu {
             menu.addItem(it)
         }
         if let t = store.lastUpdate {
-            let info = NSMenuItem(title: "Cập nhật lúc \(t.formatted(date: .omitted, time: .shortened))", action: nil, keyEquivalent: "")
+            let time = t.formatted(date: .omitted, time: .shortened)
+            let info = NSMenuItem(title: L.t("Cập nhật lúc \(time)", "Updated at \(time)"), action: nil, keyEquivalent: "")
             info.isEnabled = false
             menu.addItem(info)
         }
         for l in store.limits {
-            let info = NSMenuItem(title: "\(l.title): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))", action: nil, keyEquivalent: "")
+            let title = L.t(
+                "\(displayTitle(l)): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))",
+                "\(displayTitle(l)): \(Int(l.used.rounded()))% used · resets in \(countdown(to: l.resetsAt)) — at \(resetClock(l.resetsAt))"
+            )
+            let info = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             info.isEnabled = false
             menu.addItem(info)
         }
         let tk = store.tokens
-        let tokItem = NSMenuItem(title: "Token hôm nay: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache đọc \(formatTokens(tk.cacheRead)))", action: nil, keyEquivalent: "")
+        let tokTitle = L.t(
+            "Token hôm nay: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache đọc \(formatTokens(tk.cacheRead)))",
+            "Tokens today: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache read \(formatTokens(tk.cacheRead)))"
+        )
+        let tokItem = NSMenuItem(title: tokTitle, action: nil, keyEquivalent: "")
         tokItem.isEnabled = false
         menu.addItem(tokItem)
         let running = store.runningSessions
-        let head = NSMenuItem(title: "Claude Code: \(running.count) đang chạy · \(store.sessions.count - running.count) rảnh", action: nil, keyEquivalent: "")
+        let headTitle = L.t(
+            "Claude Code: \(running.count) đang chạy · \(store.sessions.count - running.count) rảnh",
+            "Claude Code: \(running.count) running · \(store.sessions.count - running.count) idle"
+        )
+        let head = NSMenuItem(title: headTitle, action: nil, keyEquivalent: "")
         head.isEnabled = false
         menu.addItem(head)
         for s in running {
@@ -887,31 +974,65 @@ enum SettingsMenu {
             menu.addItem(info)
         }
         menu.addItem(.separator())
-        item("Làm mới") { store.refresh() }
-        item("Hiển thị % còn lại", checked: d.bool(forKey: Pref.showRemaining)) {
+        item(L.t("Làm mới", "Refresh")) { store.refresh() }
+        item(L.t("Hiển thị % còn lại", "Show % remaining"), checked: d.bool(forKey: Pref.showRemaining)) {
             d.set(!d.bool(forKey: Pref.showRemaining), forKey: Pref.showRemaining)
         }
-        item("Luôn nằm trên cửa sổ khác", checked: d.bool(forKey: Pref.alwaysOnTop)) {
+        item(L.t("Luôn nằm trên cửa sổ khác", "Always on top of other windows"), checked: d.bool(forKey: Pref.alwaysOnTop)) {
             d.set(!d.bool(forKey: Pref.alwaysOnTop), forKey: Pref.alwaysOnTop)
             SidePanel.shared.applyLevel()
         }
-        item("Hiện token hôm nay", checked: d.bool(forKey: Pref.showTokens)) {
+        do {
+            let langMenu = NSMenu()
+            for lang in [Lang.vi, .en] {
+                let h = Handler { d.set(lang.rawValue, forKey: Pref.language) }
+                handlers.append(h)
+                let it = NSMenuItem(title: lang == .vi ? "Tiếng Việt" : "English",
+                                     action: #selector(Handler.run), keyEquivalent: "")
+                it.target = h
+                it.state = L.current == lang ? .on : .off
+                langMenu.addItem(it)
+            }
+            let langItem = NSMenuItem(title: "Ngôn ngữ / Language", action: nil, keyEquivalent: "")
+            langItem.submenu = langMenu
+            menu.addItem(langItem)
+        }
+        if NSScreen.screens.count > 1 {
+            let screenMenu = NSMenu()
+            let current = SidePanel.shared.selectedScreen ?? NSScreen.main
+            for (i, s) in NSScreen.screens.enumerated() {
+                guard let id = SidePanel.displayID(for: s) else { continue }
+                let h = Handler {
+                    d.set(Int(id), forKey: Pref.panelScreenID)
+                    SidePanel.shared.layout()
+                }
+                handlers.append(h)
+                let it = NSMenuItem(title: L.t("Màn hình \(i + 1)", "Display \(i + 1)"), action: #selector(Handler.run), keyEquivalent: "")
+                it.target = h
+                it.state = s == current ? .on : .off
+                screenMenu.addItem(it)
+            }
+            let screenItem = NSMenuItem(title: L.t("Hiển thị trên màn hình", "Show on display"), action: nil, keyEquivalent: "")
+            screenItem.submenu = screenMenu
+            menu.addItem(screenItem)
+        }
+        item(L.t("Hiện token hôm nay", "Show today's tokens"), checked: d.bool(forKey: Pref.showTokens)) {
             d.set(!d.bool(forKey: Pref.showTokens), forKey: Pref.showTokens)
             SidePanel.shared.layout()
         }
-        item("Hiện số task đang chạy", checked: d.bool(forKey: Pref.showTasks)) {
+        item(L.t("Hiện số task đang chạy", "Show running task count"), checked: d.bool(forKey: Pref.showTasks)) {
             d.set(!d.bool(forKey: Pref.showTasks), forKey: Pref.showTasks)
             SidePanel.shared.layout()
         }
-        item("Hiện Cursor", checked: d.bool(forKey: Pref.showCursor)) {
+        item(L.t("Hiện Cursor", "Show Cursor"), checked: d.bool(forKey: Pref.showCursor)) {
             d.set(!d.bool(forKey: Pref.showCursor), forKey: Pref.showCursor)
             store.recompose()
         }
-        item("Hiện trên menu bar", checked: d.bool(forKey: Pref.showMenuBar)) {
+        item(L.t("Hiện trên menu bar", "Show in menu bar"), checked: d.bool(forKey: Pref.showMenuBar)) {
             d.set(!d.bool(forKey: Pref.showMenuBar), forKey: Pref.showMenuBar)
         }
         menu.addItem(.separator())
-        item("Thoát") { NSApp.terminate(nil) }
+        item(L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 }
@@ -932,7 +1053,20 @@ final class SidePanel {
 
     var currentTop: CGFloat { panel?.frame.maxY ?? 0 }
 
-    private var screenFrame: NSRect { (NSScreen.main ?? NSScreen.screens[0]).visibleFrame }
+    /// Persistent id of the physical display, stable across launches (unlike NSScreen
+    /// instances, which are recreated whenever the display setup changes).
+    static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    var selectedScreen: NSScreen? {
+        guard let id = UserDefaults.standard.object(forKey: Pref.panelScreenID) as? Int else { return nil }
+        return NSScreen.screens.first { Self.displayID(for: $0) == CGDirectDisplayID(id) }
+    }
+
+    private var screenFrame: NSRect {
+        (selectedScreen ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+    }
 
     func install(store: UsageStore) {
         guard panel == nil else { return }
@@ -997,6 +1131,7 @@ final class SidePanel {
 
 struct MenuPanel: View {
     @ObservedObject var store: UsageStore
+    @AppStorage(Pref.language) private var langRaw = Lang.vi.rawValue
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("AI usage").font(.system(size: 13, weight: .bold))
@@ -1006,22 +1141,23 @@ struct MenuPanel: View {
             ForEach(store.limits) { l in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(l.title).font(.system(size: 12))
+                        Text(displayTitle(l)).font(.system(size: 12))
                         Spacer()
-                        Text("dùng \(Int(l.used.rounded()))% · \(countdown(to: l.resetsAt))")
+                        Text(L.t("dùng \(Int(l.used.rounded()))% · \(countdown(to: l.resetsAt))",
+                                 "\(Int(l.used.rounded()))% used · \(countdown(to: l.resetsAt))"))
                             .font(.system(size: 12).monospacedDigit())
                             .foregroundStyle(severityColor(used: l.used))
                     }
-                    Text("Reset lúc \(resetClock(l.resetsAt))")
+                    Text(L.t("Reset lúc \(resetClock(l.resetsAt))", "Resets at \(resetClock(l.resetsAt))"))
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
             Divider()
             HStack {
-                Button("Làm mới") { store.refresh() }
+                Button(L.t("Làm mới", "Refresh")) { store.refresh() }
                 Spacer()
-                Button("Thoát") { NSApp.terminate(nil) }
+                Button(L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
             }
             .controlSize(.small)
         }
@@ -1054,6 +1190,7 @@ struct AiUsageApp: App {
             Pref.showCursor: true,
             Pref.showTasks: true,
             Pref.showTokens: true,
+            Pref.language: Lang.vi.rawValue,
         ])
     }
 
