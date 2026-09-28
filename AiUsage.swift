@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import Security
 
 // MARK: - Model
 
@@ -195,8 +196,31 @@ final class UsageStore: ObservableObject {
     }
 
     /// Reads the OAuth token Claude Code stores in the login Keychain.
+    ///
+    /// Switching Claude accounts can leave more than one item under this service name
+    /// (the CLI adds a fresh entry per account instead of always overwriting in place),
+    /// and `security find-generic-password` only ever returns a single arbitrary match.
+    /// Querying via the Security framework directly lets us fetch every match and pick
+    /// the one most recently written, so a newly logged-in account is picked up right away.
     nonisolated static func readClaudeToken() throws -> String {
-        guard let data = run("/usr/bin/security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"]),
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let items = result as? [[String: Any]], !items.isEmpty
+        else { throw WidgetError.msg("Không đọc được token Claude Code trong Keychain") }
+
+        let newest = items.max { a, b in
+            let da = a[kSecAttrModificationDate as String] as? Date ?? .distantPast
+            let db = b[kSecAttrModificationDate as String] as? Date ?? .distantPast
+            return da < db
+        }
+        guard let data = newest?[kSecValueData as String] as? Data,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String
