@@ -1,4 +1,4 @@
-# ClaudeUsage
+# AiUsage
 
 Widget macOS nhỏ gọn bám mép phải màn hình, hiển thị realtime:
 
@@ -17,15 +17,15 @@ Kèm icon trên menu bar. Bấm vào tab để mở cài đặt, kéo lên/xuố
 ## Build
 
 ```bash
-./build.sh        # tạo ClaudeUsage.app
-./package.sh      # tạo ClaudeUsage.dmg để cài máy khác
+./build.sh        # tạo AiUsage.app
+./package.sh      # tạo AiUsage.dmg để cài máy khác
 ```
 
-Cài: kéo `ClaudeUsage.app` vào `/Applications`. App chưa notarize nên lần đầu cần
+Cài: kéo `AiUsage.app` vào `/Applications`. App chưa notarize nên lần đầu cần
 **System Settings → Privacy & Security → Open Anyway**, hoặc:
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/ClaudeUsage.app
+xattr -dr com.apple.quarantine /Applications/AiUsage.app
 ```
 
 ## Nguồn dữ liệu

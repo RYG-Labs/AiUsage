@@ -172,7 +172,7 @@ final class UsageStore: ObservableObject {
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("claude-usage-widget/1.0", forHTTPHeaderField: "User-Agent")
+        req.setValue("aiusage/1.0", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 15
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -227,7 +227,7 @@ final class UsageStore: ObservableObject {
             req.setValue(cookie, forHTTPHeaderField: "Cookie")
             req.setValue("https://cursor.com", forHTTPHeaderField: "Origin")
             req.setValue("https://cursor.com/dashboard", forHTTPHeaderField: "Referer")
-            req.setValue("Mozilla/5.0 claude-usage-widget/1.0", forHTTPHeaderField: "User-Agent")
+            req.setValue("Mozilla/5.0 aiusage/1.0", forHTTPHeaderField: "User-Agent")
             req.timeoutInterval = 15
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -965,7 +965,7 @@ struct MenuPanel: View {
     @ObservedObject var store: UsageStore
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Claude usage").font(.system(size: 13, weight: .bold))
+            Text("AI usage").font(.system(size: 13, weight: .bold))
             ForEach([store.error, store.cursorError].compactMap { $0 }, id: \.self) { e in
                 Text(e).font(.system(size: 11)).foregroundStyle(.red)
             }
@@ -1000,13 +1000,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct ClaudeUsageApp: App {
+struct AiUsageApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ObservedObject private var store = UsageStore.shared
     @AppStorage(Pref.showMenuBar) private var showMenuBar = true
 
     init() {
         NSApplication.shared.setActivationPolicy(.accessory)
+        Self.migrateOldDefaults()
         UserDefaults.standard.register(defaults: [
             Pref.alwaysOnTop: true,
             Pref.showMenuBar: true,
@@ -1015,6 +1016,17 @@ struct ClaudeUsageApp: App {
             Pref.showTasks: true,
             Pref.showTokens: true,
         ])
+    }
+
+    /// The app used to be "ClaudeUsage" (bundle id local.claude-usage-widget);
+    /// carry its settings, widget position and cached limits over once.
+    static func migrateOldDefaults() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "migratedFromClaudeUsage"),
+              let old = UserDefaults(suiteName: "local.claude-usage-widget")?
+                .persistentDomain(forName: "local.claude-usage-widget") else { return }
+        for (k, v) in old where d.object(forKey: k) == nil { d.set(v, forKey: k) }
+        d.set(true, forKey: "migratedFromClaudeUsage")
     }
 
     var body: some Scene {
