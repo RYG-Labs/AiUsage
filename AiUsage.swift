@@ -1995,9 +1995,12 @@ struct TokenChartView: View {
     @AppStorage("chartNoCache") private var noCache = false
     @AppStorage(Pref.language) private var langRaw = Lang.vi.rawValue
 
+    // GitHub contribution graph proportions: 10 px squares, 3 px gaps.
+    private let cell: CGFloat = 10
+    private let gap: CGFloat = 3
     private let hourDays = 14
     private let calendarWeeks = 26
-    private let cell: CGFloat = 18
+    private let labelWidth: CGFloat = 50
 
     private func value(_ b: TokenHistory.Bucket?) -> Int {
         guard let b else { return 0 }
@@ -2011,17 +2014,20 @@ struct TokenChartView: View {
         return (0..<24).reduce(0) { $0 + value(model.buckets[h0 + $1]) }
     }
 
+    private var caption: Font { .system(size: 9) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
                 Picker("", selection: $mode) {
-                    Text(L.t("Theo giờ (14 ngày)", "By hour (14 days)")).tag(0)
-                    Text(L.t("Theo ngày (6 tháng)", "By day (6 months)")).tag(1)
+                    Text(L.t("Theo giờ", "By hour")).tag(0)
+                    Text(L.t("Theo ngày", "By day")).tag(1)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 320)
+                .labelsHidden()
+                .fixedSize()
                 Spacer()
-                Toggle(L.t("Bỏ cache đọc", "Exclude cache reads"), isOn: $noCache)
+                Toggle(L.t("Bỏ cache đọc", "No cache reads"), isOn: $noCache)
                     .toggleStyle(.checkbox)
                     .help(L.t("Cache đọc chiếm phần lớn token nhưng rẻ hơn nhiều. Bỏ đi để thấy mức dùng \"thật\".",
                               "Cache reads are most tokens but much cheaper. Exclude them to see \"real\" usage."))
@@ -2029,24 +2035,30 @@ struct TokenChartView: View {
                     .buttonStyle(.borderless)
                     .disabled(model.loading)
             }
+            .controlSize(.small)
+            .font(.system(size: 11))
 
             if !model.loaded {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text(L.t("Đang đọc lịch sử Claude Code… (lần đầu có thể mất vài giây)",
-                             "Reading Claude Code history… (the first time can take a few seconds)"))
-                        .foregroundStyle(.secondary)
+                    Text(L.t("Đang đọc lịch sử…", "Reading history…")).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, minHeight: 280)
+                .frame(maxWidth: .infinity, minHeight: 190)
             } else if mode == 0 {
                 hourGrid
             } else {
                 dayGrid
             }
         }
-        .padding(20)
-        .frame(minWidth: 720)
+        .padding(14)
+        .fixedSize()
         .onAppear { model.load() }
+    }
+
+    private func square(_ level: Int, _ pal: HeatPalette) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(pal.color(level))
+            .frame(width: cell, height: cell)
     }
 
     // MARK: By hour — rows = days, columns = hours
@@ -2063,54 +2075,44 @@ struct TokenChartView: View {
         for (i, v) in values.enumerated() { hourSums[i % 24] += v }
         let peakHour = hourSums.indices.max { hourSums[$0] < hourSums[$1] } ?? 0
         let total = values.reduce(0, +)
-        let busiest = days.max { dayTotal($0) < dayTotal($1) }
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 3) {
-                Text("").frame(width: 76)
-                ForEach(0..<24, id: \.self) { h in
-                    Text(h % 3 == 0 ? String(format: "%02d", h) : "")
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: cell)
-                }
-            }
-            ForEach(days, id: \.self) { d in
-                let h0 = Int(d.timeIntervalSince1970 / 3600)
-                HStack(spacing: 3) {
-                    Text("\(weekdayShort(d)) \(dayMonth(d))")
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 76, alignment: .leading)
+        return VStack(alignment: .leading, spacing: 6) {
+            Grid(horizontalSpacing: gap, verticalSpacing: gap) {
+                GridRow {
+                    Color.clear.frame(width: labelWidth, height: 10)
                     ForEach(0..<24, id: \.self) { h in
-                        let v = value(model.buckets[h0 + h])
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(pal.color(heatLevel(v, t)))
-                            .frame(width: cell, height: cell)
-                            .help("\(weekdayShort(d)) \(dayMonth(d)) · \(String(format: "%02d:00–%02d:00", h, (h + 1) % 24))\n\(formatTokens(v)) token")
+                        Text(h % 6 == 0 ? "\(h)h" : "")
+                            .font(caption).foregroundStyle(.secondary)
+                            .fixedSize()
+                            .frame(width: cell, alignment: .leading)
                     }
-                    Text(formatTokens(dayTotal(d)))
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
+                    Color.clear.frame(width: 1, height: 1)
+                }
+                ForEach(days, id: \.self) { d in
+                    let h0 = Int(d.timeIntervalSince1970 / 3600)
+                    GridRow {
+                        Text("\(weekdayShort(d)) \(dayMonth(d))")
+                            .font(caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .frame(width: labelWidth, alignment: .leading)
+                        ForEach(0..<24, id: \.self) { h in
+                            let v = value(model.buckets[h0 + h])
+                            square(heatLevel(v, t), pal)
+                                .help("\(weekdayShort(d)) \(dayMonth(d)) · \(String(format: "%02d:00–%02d:00", h, (h + 1) % 24))\n\(formatTokens(v)) token")
+                        }
+                        Text(formatTokens(dayTotal(d)))
+                            .font(caption.monospacedDigit()).foregroundStyle(.secondary)
+                            .frame(width: 34, alignment: .trailing)
+                    }
                 }
             }
-            HStack {
-                legend(pal)
-                Spacer()
-                Text(L.t("14 ngày: \(formatTokens(total)) · Giờ cao điểm: \(String(format: "%02d:00", peakHour))",
-                         "14 days: \(formatTokens(total)) · Peak hour: \(String(format: "%02d:00", peakHour))")
-                     + (busiest.map { L.t(" · Nhiều nhất: \(weekdayShort($0)) \(dayMonth($0))", " · Busiest: \(weekdayShort($0)) \(dayMonth($0))") } ?? ""))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+            footer(pal, L.t("14 ngày: \(formatTokens(total)) · cao điểm \(peakHour)h",
+                            "14 days: \(formatTokens(total)) · peak \(peakHour)h"))
         }
     }
 
     // MARK: By day — GitHub contribution calendar
 
     private var dayGrid: some View {
-        // Start on the Monday `calendarWeeks - 1` weeks before this week's Monday.
         let thisMonday = gmt7.dateInterval(of: .weekOfYear, for: Date())?.start ?? todayStart
         let start = gmt7.date(byAdding: .weekOfYear, value: -(calendarWeeks - 1), to: thisMonday)!
         let weeks: [[Date]] = (0..<calendarWeeks).map { w in
@@ -2122,52 +2124,39 @@ struct TokenChartView: View {
         let pal = HeatPalette(dark: scheme == .dark)
         let sum = totals.values.reduce(0, +)
         let active = totals.values.filter { $0 > 0 }.count
-        let best = totals.max { $0.value < $1.value }
-        let c: CGFloat = 18
         let rowLabels = L.current == .vi ? ["T2", "", "T4", "", "T6", "", "CN"] : ["Mon", "", "Wed", "", "Fri", "", "Sun"]
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 3) {
-                VStack(spacing: 3) {
-                    Text("").frame(height: 12)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: gap) {
+                VStack(alignment: .leading, spacing: gap) {
+                    Color.clear.frame(width: 1, height: 10)
                     ForEach(0..<7, id: \.self) { i in
-                        Text(rowLabels[i]).font(.system(size: 9)).foregroundStyle(.secondary).frame(height: c)
+                        Text(rowLabels[i]).font(caption).foregroundStyle(.secondary).frame(height: cell)
                     }
                 }
-                .frame(width: 26)
+                .frame(width: 22, alignment: .leading)
                 ForEach(weeks.indices, id: \.self) { w in
-                    VStack(spacing: 3) {
+                    VStack(spacing: gap) {
                         let first = weeks[w][0]
                         let showMonth = w == 0 || gmt7.component(.month, from: first) != gmt7.component(.month, from: weeks[w - 1][0])
                         Text(showMonth ? monthLabel(first) : "")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                            .font(caption).foregroundStyle(.secondary)
                             .fixedSize()
-                            .frame(width: c, height: 12, alignment: .leading)
+                            .frame(width: cell, height: 10, alignment: .leading)
                         ForEach(weeks[w], id: \.self) { d in
                             if d > todayStart {
-                                Color.clear.frame(width: c, height: c)
+                                Color.clear.frame(width: cell, height: cell)
                             } else {
                                 let v = totals[d] ?? 0
-                                RoundedRectangle(cornerRadius: 2.5)
-                                    .fill(pal.color(heatLevel(v, t)))
-                                    .frame(width: c, height: c)
+                                square(heatLevel(v, t), pal)
                                     .help("\(weekdayShort(d)) \(dayMonth(d))\n\(formatTokens(v)) token")
                             }
                         }
                     }
                 }
             }
-            HStack {
-                legend(pal)
-                Spacer()
-                Text(L.t("6 tháng: \(formatTokens(sum)) · \(active) ngày có dùng",
-                         "6 months: \(formatTokens(sum)) · \(active) active days")
-                     + (best.map { L.t(" · Cao nhất: \(dayMonth($0.key)) (\(formatTokens($0.value)))",
-                                       " · Top day: \(dayMonth($0.key)) (\(formatTokens($0.value)))") } ?? ""))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
+            footer(pal, L.t("6 tháng: \(formatTokens(sum)) · \(active) ngày có dùng",
+                            "6 months: \(formatTokens(sum)) · \(active) active days"))
         }
     }
 
@@ -2176,11 +2165,13 @@ struct TokenChartView: View {
         return L.current == .vi ? "Th\(m)" : ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m - 1]
     }
 
-    private func legend(_ pal: HeatPalette) -> some View {
+    private func footer(_ pal: HeatPalette, _ summary: String) -> some View {
         HStack(spacing: 3) {
-            Text(L.t("Ít", "Less")).font(.system(size: 10)).foregroundStyle(.secondary)
-            ForEach(0..<5, id: \.self) { RoundedRectangle(cornerRadius: 2.5).fill(pal.color($0)).frame(width: 11, height: 11) }
-            Text(L.t("Nhiều", "More")).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(summary).font(caption).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(L.t("Ít", "Less")).font(caption).foregroundStyle(.secondary)
+            ForEach(0..<5, id: \.self) { square($0, pal) }
+            Text(L.t("Nhiều", "More")).font(caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -2191,13 +2182,13 @@ enum ChartWindow {
 
     static func show() {
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
-                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            let w = NSWindow(contentRect: .zero, styleMask: [.titled, .closable],
                              backing: .buffered, defer: false)
-            w.title = L.t("AiUsage — Token Claude Code", "AiUsage — Claude Code tokens")
+            w.title = L.t("Token Claude Code", "Claude Code tokens")
             w.isReleasedWhenClosed = false
-            w.contentView = NSHostingView(rootView: TokenChartView())
-            w.setContentSize(w.contentView?.fittingSize ?? NSSize(width: 780, height: 560))
+            let host = NSHostingView(rootView: TokenChartView())
+            host.sizingOptions = [.preferredContentSize]    // window follows the content size
+            w.contentView = host
             w.center()
             window = w
         }
