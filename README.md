@@ -1,92 +1,142 @@
-<p align="center">
-  <img src="icon_1024.png" width="128" alt="AiUsage icon">
-</p>
+<div align="center">
 
-<h1 align="center">AiUsage</h1>
+<img src="icon_1024.png" width="112" alt="AiUsage">
 
-<p align="center">
-  A tiny macOS side widget that shows your AI coding usage in real time.<br>
-  <b>English</b> · <a href="README.vi.md">Tiếng Việt</a>
-</p>
+# AiUsage
 
----
+**Your AI coding usage, always in view.**<br>
+A native macOS side widget for Claude Code and Cursor usage limits, running tasks and daily token burn.
 
-AiUsage docks a slim black tab to the right edge of your screen and keeps these numbers in view:
+[![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](#requirements)
+[![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](AiUsage.swift)
+[![Universal](https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-universal-555555)](#build-from-source)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-| | What it shows |
-| --- | --- |
-| 🟠 **Claude limits** | Used (or remaining) % of the 5-hour session and the weekly limit, plus the Opus/Sonnet weekly limits if your plan has them. Hover a ring to see when it resets. |
-| ⚪ **Cursor** | % of the included plan usage in the current billing cycle. Only shown if Cursor is installed and signed in. *Experimental.* |
-| 🟢 **Running tasks** | How many Claude Code sessions on this Mac are busy right now. Hover to see their names. |
-| 🔥 **Tokens today** | Total Claude Code tokens used today on this Mac. Hover for input, output and cache breakdown. The flame flickers faster while a task is running. |
+**English** · [Tiếng Việt](README.vi.md)
 
-A menu bar item (✦ with the 5-hour %) is also available.
+<img src="docs/preview.png" width="360" alt="AiUsage widget docked to the right edge of the screen">
+
+</div>
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [How it works](#how-it-works)
+- [Privacy & security](#privacy--security)
+- [Troubleshooting](#troubleshooting)
+- [Build from source](#build-from-source)
+- [Disclaimer](#disclaimer)
+- [License](#license)
+
+## Features
+
+| | Feature | Details |
+| :-: | --- | --- |
+| 🟠 | **Claude limits** | Usage of the 5-hour session and the weekly limit, plus the Opus/Sonnet weekly limits if your plan has them. Shows a countdown and the exact reset time in GMT+7. |
+| ⚪ | **Cursor usage** | % of the included plan usage in the current billing cycle. *Experimental.* |
+| 🟢 | **Running tasks** | Number of Claude Code sessions on this Mac that are working right now. |
+| 🔥 | **Tokens today** | Total Claude Code tokens used today, with a breakdown of input, output and cache. The flame flickers faster while a task is running. |
+| 🪟 | **Unobtrusive** | 40 px wide tab docked to the screen edge. Drag it up or down, pick a display, or keep it on the desktop only. |
+| 🌐 | **Bilingual** | Vietnamese and English UI, independent of the macOS system language. |
+| ⚡️ | **Lightweight** | Native SwiftUI + Core Animation with no dependencies. Uses about 0% CPU when idle. Single ~1 MB universal binary. |
+
+It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 ## Requirements
 
-- macOS 14 Sonoma or later (Apple Silicon or Intel)
-- [Claude Code](https://code.claude.com) installed and signed in with a Pro/Max/Team/Enterprise account (`claude` → `/login`)
-- Optional: Cursor, signed in
+- macOS 14 Sonoma or later, on Apple Silicon or Intel
+- [Claude Code](https://code.claude.com), signed in with a Pro, Max, Team or Enterprise account (`claude` → `/login`)
+- *Optional:* [Cursor](https://cursor.com), signed in
 
-## Install
+## Installation
 
-1. Download `AiUsage.dmg` from [Releases](https://github.com/RYG-Labs/AiUsage/releases), or build it yourself (see below).
+1. Download **`AiUsage.dmg`** from [Releases](https://github.com/RYG-Labs/AiUsage/releases), or [build it yourself](#build-from-source).
 2. Open the DMG and drag **AiUsage** into **Applications**.
-3. The app is not notarized, so macOS blocks it the first time. Either open it once and click **System Settings → Privacy & Security → Open Anyway**, or run:
-
-   ```bash
-   xattr -dr com.apple.quarantine /Applications/AiUsage.app
-   ```
-
-4. If macOS asks for Keychain access to read the Claude Code credentials, click **Always Allow**.
-5. Optional: add AiUsage to **System Settings → General → Login Items** so it starts with your Mac.
+3. Allow the app on first launch. It is not notarized by Apple, so do one of the following:
+   - Open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+   - Or run:
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/AiUsage.app
+     ```
+4. If macOS asks for Keychain access to the Claude Code credentials, click **Always Allow**.
+5. *Optional:* to start AiUsage at login, add it under **System Settings → General → Login Items**.
 
 ## Usage
 
-- **Click the tab** to open the menu.
-- **Drag the tab** up or down to move it along the screen edge. The position is remembered.
-- **Hover** a ring or badge for details.
-
-The menu has these toggles:
-
-| Menu item | Effect |
+| Action | Result |
 | --- | --- |
-| Làm mới | Refresh now |
-| Hiển thị % còn lại | Show remaining % instead of used % |
-| Luôn nằm trên cửa sổ khác | Keep the tab above other windows. Turn off to keep it on the desktop only. |
-| Hiện token hôm nay | Show or hide the 🔥 token counter |
-| Hiện số task đang chạy | Show or hide the running-task badge |
-| Hiện Cursor | Show or hide the Cursor ring |
-| Hiện trên menu bar | Show or hide the menu bar item |
-| Thoát | Quit |
+| **Click** the tab | Open the settings menu, which also shows detailed usage |
+| **Drag** the tab up or down | Move it along the screen edge. The position is remembered. |
+| **Hover** a ring or badge | Tooltip with used/remaining %, countdown and exact reset time |
 
-> The UI is currently in Vietnamese.
+### Settings menu
 
-## Build from source
-
-```bash
-./build.sh      # builds AiUsage.app (universal: arm64 + x86_64)
-./package.sh    # builds AiUsage.dmg for installing on other Macs
-```
-
-To change the app icon, edit `make_icon.swift`. The comment at the top of that file shows how to regenerate `icon_1024.png`.
+| Option | Description |
+| --- | --- |
+| Refresh | Fetch usage now |
+| Show % remaining | Show remaining % instead of used % |
+| Always on top of other windows | Keep the tab above other windows. Turn it off to show the tab on the desktop only. |
+| Language | Tiếng Việt / English |
+| Show on display | Choose which monitor the tab is on. Only appears with more than one display. |
+| Show today's tokens | Toggle the 🔥 token counter |
+| Show running task count | Toggle the running-task badge |
+| Show Cursor | Toggle the Cursor ring |
+| Show in menu bar | Toggle the menu bar item |
+| Quit | Quit AiUsage |
 
 ## How it works
 
 | Data | Source | Refresh |
 | --- | --- | --- |
-| Claude limits | `https://api.anthropic.com/api/oauth/usage`, called with the Claude Code OAuth token from the login Keychain | every 90 s |
-| Cursor usage | Token from `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, then `cursor.com/api/usage-summary` (falls back to `/api/usage` on legacy request-based plans) | every 90 s |
-| Running tasks | `~/.claude/sessions/*.json`, where `status: "busy"` and the process is still alive | every 2 s |
-| Tokens today | `usage` fields in `~/.claude/projects/**/*.jsonl`, read incrementally and reset at local midnight | every 30 s |
+| Claude limits | `api.anthropic.com/api/oauth/usage`, called with the Claude Code OAuth token from the login Keychain. If several Keychain items match, the most recently modified one is used. | 90 s |
+| Cursor usage | Access token from Cursor's local `state.vscdb`, then `cursor.com/api/usage-summary`. Legacy request-based plans fall back to `/api/usage`. | 90 s |
+| Running tasks | `~/.claude/sessions/*.json`. A session counts when its `status` is `"busy"` and its process is still alive. | 2 s |
+| Tokens today | `usage` fields in `~/.claude/projects/**/*.jsonl`. Files are read incrementally, each response is counted once, and the total resets at local midnight. | 30 s |
 
-Notes:
+**Scope.** Limits are account-wide, so they are accurate everywhere. *Running tasks* and *tokens today* only count Claude Code on this Mac, which includes the desktop app's Code tab, the CLI and the IDE extensions. They do not count claude.ai chats or other machines.
 
-- **Read-only.** AiUsage never writes to the Keychain or to Claude or Cursor data. Nothing is sent anywhere except the two usage APIs above.
-- **Unofficial endpoints.** The Claude and Cursor usage endpoints are internal and may change without notice.
-- **Rate limiting.** If the Claude API returns HTTP 429, the widget keeps showing the last known numbers and backs off, from 2 up to 15 minutes.
-- **Scope.** Running tasks and tokens today only count Claude Code on this Mac. They include the Claude desktop app's Code tab, the CLI and the VS Code/Cursor extensions. claude.ai chats and remote machines are not counted. Limits are account-wide, so they are always accurate.
-- **Token totals include cache reads.** Cache reads are usually the vast majority of tokens and are much cheaper than regular input or output.
+**Rate limits.** If the Claude API returns HTTP 429, AiUsage keeps showing the last known values and backs off, starting at 2 minutes and going up to 15 minutes.
+
+## Privacy & security
+
+- **Read-only.** AiUsage never modifies the Keychain or any Claude Code or Cursor data.
+- **No telemetry.** The only network requests go to the two usage endpoints listed above.
+- **Tokens stay in memory.** Credentials are read when needed and never written to disk or logs.
+- **Auditable.** The whole app is one Swift file ([`AiUsage.swift`](AiUsage.swift)).
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| *"AiUsage can't be opened"* | See step 3 of [Installation](#installation). |
+| Rings are empty or show **!** | Open the menu to read the ⚠︎ message. If the token has expired, open Claude Code once so it refreshes the token. |
+| ⚠︎ "rate limited" | The last known values are still shown. It recovers on its own within 2–15 minutes. Avoid restarting the app repeatedly. |
+| No Cursor ring | Make sure Cursor is signed in, and check that **Show Cursor** is enabled. |
+| Old icon in Finder or Launchpad | Run `killall Dock`. |
+
+## Build from source
+
+```bash
+git clone git@github.com:RYG-Labs/AiUsage.git && cd AiUsage
+./build.sh      # builds AiUsage.app (universal: arm64 + x86_64)
+./package.sh    # builds AiUsage.dmg
+```
+
+| File | Purpose |
+| --- | --- |
+| `AiUsage.swift` | Entire app: data fetching, widget UI, menu, localization |
+| `build.sh` | Compiles a universal binary and assembles the `.app` bundle |
+| `package.sh` | Wraps the app in a drag-to-install DMG |
+| `make_icon.swift` | Renders `icon_1024.png`. Usage is in the header comment. |
+
+Requires Xcode Command Line Tools (`xcode-select --install`).
+
+## Disclaimer
+
+AiUsage is an independent project. It is not affiliated with, endorsed by, or sponsored by Anthropic or Anysphere (Cursor). "Claude" and "Cursor" are trademarks of their respective owners. The usage endpoints are undocumented and may change or break at any time.
 
 ## License
 
