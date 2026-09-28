@@ -324,6 +324,16 @@ enum Pref {
     static let showTokens = "showTokens"
 }
 
+/// Absolute reset time in GMT+7, e.g. "21:10 T2 28/09 (GMT+7)".
+func resetClock(_ date: Date?) -> String {
+    guard let date else { return "—" }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "vi_VN")
+    f.timeZone = TimeZone(secondsFromGMT: 7 * 3600)
+    f.dateFormat = "HH:mm EEE dd/MM"
+    return f.string(from: date) + " (GMT+7)"
+}
+
 func countdown(to date: Date?, now: Date = .now) -> String {
     guard let date else { return "—" }
     let s = Int(date.timeIntervalSince(now))
@@ -491,7 +501,7 @@ struct RingGauge: View {
                 .foregroundStyle(.white)
                 .frame(height: 11)
         }
-        .help("\(limit.title)\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt))\n(Bấm để mở cài đặt, kéo để di chuyển)")
+        .help("\(limit.title)\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\n(Bấm để mở cài đặt, kéo để di chuyển)")
     }
 }
 
@@ -830,7 +840,7 @@ enum SettingsMenu {
             menu.addItem(info)
         }
         for l in store.limits {
-            let info = NSMenuItem(title: "\(l.title): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt))", action: nil, keyEquivalent: "")
+            let info = NSMenuItem(title: "\(l.title): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))", action: nil, keyEquivalent: "")
             info.isEnabled = false
             menu.addItem(info)
         }
@@ -970,12 +980,17 @@ struct MenuPanel: View {
                 Text(e).font(.system(size: 11)).foregroundStyle(.red)
             }
             ForEach(store.limits) { l in
-                HStack {
-                    Text(l.title).font(.system(size: 12))
-                    Spacer()
-                    Text("dùng \(Int(l.used.rounded()))% · \(countdown(to: l.resetsAt))")
-                        .font(.system(size: 12).monospacedDigit())
-                        .foregroundStyle(severityColor(used: l.used))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(l.title).font(.system(size: 12))
+                        Spacer()
+                        Text("dùng \(Int(l.used.rounded()))% · \(countdown(to: l.resetsAt))")
+                            .font(.system(size: 12).monospacedDigit())
+                            .foregroundStyle(severityColor(used: l.used))
+                    }
+                    Text("Reset lúc \(resetClock(l.resetsAt))")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
             }
             Divider()
