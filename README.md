@@ -39,6 +39,8 @@ A native macOS side widget for Claude Code and Cursor usage limits, running task
 | ⚪ | **Cursor usage** | % of the included plan usage in the current billing cycle. *Experimental.* |
 | 🟢 | **Running tasks** | Number of Claude Code sessions on this Mac that are working right now. |
 | 🔥 | **Tokens today** | Total Claude Code tokens used today, with a breakdown of input, output and cache. The flame flickers faster while a task is running. |
+| 🔔 | **Smart notifications** | Alerts at 80% / 95%, when a limit resets, an early warning when your pace will run out before the reset, and when a Claude Code task finishes (with its name and duration). |
+| 📈 | **Pace forecast** | Estimates your burn rate and when you would hit 100% at the current pace, for example *"~20%/h → hits 100% at 16:40, 1h before reset"*. |
 | 🪟 | **Unobtrusive** | 40 px wide tab docked to the screen edge. Drag it up or down, pick a display, or keep it on the desktop only. |
 | 🌐 | **Bilingual** | Vietnamese and English UI, independent of the macOS system language. |
 | ⚡️ | **Lightweight** | Native SwiftUI + Core Animation with no dependencies. Uses about 0% CPU when idle. Single ~1 MB universal binary. |
@@ -85,6 +87,9 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 | Show running task count | Toggle the running-task badge |
 | Show Cursor | Toggle the Cursor ring |
 | Show in menu bar | Toggle the menu bar item |
+| Notifications | Choose which alerts to receive, and send a test notification |
+| Launch at login | Start AiUsage automatically when you log in |
+| Check for updates… | Check GitHub Releases now. AiUsage also checks automatically every 6 hours. |
 | Quit | Quit AiUsage |
 
 ## How it works
@@ -98,12 +103,16 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 **Scope.** Limits are account-wide, so they are accurate everywhere. *Running tasks* and *tokens today* only count Claude Code on this Mac, which includes the desktop app's Code tab, the CLI and the IDE extensions. They do not count claude.ai chats or other machines.
 
+**Forecast.** The pace is the change in usage over the last hour (5-hour limit) or the last 24 hours (weekly and monthly limits). It needs at least 15 minutes or 2 hours of samples before it shows anything.
+
+**Wake from sleep.** AiUsage refreshes everything a few seconds after the Mac wakes up.
+
 **Rate limits.** If the Claude API returns HTTP 429, AiUsage keeps showing the last known values and backs off, starting at 2 minutes and going up to 15 minutes.
 
 ## Privacy & security
 
 - **Read-only.** AiUsage never modifies the Keychain or any Claude Code or Cursor data.
-- **No telemetry.** The only network requests go to the two usage endpoints listed above.
+- **No telemetry.** The only network requests go to the two usage endpoints listed above and to the GitHub Releases API, which is used to check for updates.
 - **Tokens stay in memory.** Credentials are read when needed and never written to disk or logs.
 - **Auditable.** The whole app is one Swift file ([`AiUsage.swift`](AiUsage.swift)).
 

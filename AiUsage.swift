@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 import Combine
 import Security
+@preconcurrency import UserNotifications
+import ServiceManagement
 
 // MARK: - Model
 
@@ -45,6 +47,14 @@ final class UsageStore: ObservableObject {
     @Published var loading = false
     @Published var sessions: [ClaudeSession] = []
     @Published var tokens = TokenTotals()
+    @Published var forecasts: [LimitKind: Forecast] = [:]
+    @Published var update: AppUpdate?
+
+    let watcher = LimitWatcher()
+    private var busySince: [Int: Date] = [:]
+    private var sessionsPrimed = false
+    private var updateTimer: Timer?
+    private var wakeObserver: NSObjectProtocol?
 
     private let tokenCounter = TokenCounter()
     private var tokenTimer: Timer?
@@ -71,6 +81,86 @@ final class UsageStore: ObservableObject {
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshSessions() }
         }
+        // After the lid opens, refresh right away instead of waiting for the next tick.
+        // Wait a few seconds so Wi-Fi can reconnect first.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                self?.refresh()
+                self?.refreshSessions()
+                self?.refreshTokens()
+            }
+        }
+    }
+
+    // MARK: Updates
+
+    nonisolated static var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+
+    func startUpdateChecks() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(15))
+            self.checkForUpdate()
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkForUpdate() }
+        }
+    }
+
+    /// Looks at the latest GitHub release; notifies once per new version (or always when `manual`).
+    func checkForUpdate(manual: Bool = false) {
+        Task {
+            let current = Self.appVersion
+            do {
+                var req = URLRequest(url: URL(string: "https://api.github.com/repos/RYG-Labs/AiUsage/releases/latest")!)
+                req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+                req.setValue("aiusage/\(current)", forHTTPHeaderField: "User-Agent")
+                req.timeoutInterval = 15
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard (resp as? HTTPURLResponse)?.statusCode == 200,
+                      let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = obj["tag_name"] as? String,
+                      let page = (obj["html_url"] as? String).flatMap(URL.init(string:))
+                else { throw WidgetError.msg("GitHub") }
+                let latest = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+                if Self.isVersion(latest, newerThan: current) {
+                    update = AppUpdate(version: latest, url: page)
+                    let d = UserDefaults.standard
+                    if manual || d.string(forKey: "notifiedUpdateVersion") != latest {
+                        d.set(latest, forKey: "notifiedUpdateVersion")
+                        Notifier.post(L.t("⬆︎ Đã có AiUsage v\(latest)", "⬆︎ AiUsage v\(latest) is available"),
+                                      L.t("Bạn đang dùng v\(current). Bấm để mở trang tải về.",
+                                          "You have v\(current). Click to open the download page."),
+                                      url: page)
+                    }
+                } else {
+                    update = nil
+                    if manual {
+                        Notifier.post("AiUsage", L.t("Bạn đang dùng bản mới nhất (v\(current)).",
+                                                     "You're on the latest version (v\(current))."))
+                    }
+                }
+            } catch {
+                if manual {
+                    Notifier.post("AiUsage", L.t("Không kiểm tra được bản mới. Thử lại sau.",
+                                                 "Couldn't check for updates. Try again later."))
+                }
+            }
+        }
+    }
+
+    nonisolated static func isVersion(_ a: String, newerThan b: String) -> Bool {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }
+        let y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
     }
 
     func refreshTokens() {
@@ -99,7 +189,28 @@ final class UsageStore: ObservableObject {
             out.append(ClaudeSession(pid: pid, name: name, status: obj["status"] as? String ?? "unknown"))
         }
         out.sort { $0.pid < $1.pid }
+        notifyFinishedTasks(out)
         if out != sessions { sessions = out }
+    }
+
+    /// Posts "task finished" when a session goes busy → idle (or its process exits).
+    /// Very short turns (< 20 s) are skipped so quick replies don't spam.
+    private func notifyFinishedTasks(_ now: [ClaudeSession]) {
+        let t = Date()
+        let busyNow = Set(now.filter(\.isBusy).map(\.pid))
+        for s in now where s.isBusy && busySince[s.pid] == nil { busySince[s.pid] = t }
+        for (pid, start) in busySince where !busyNow.contains(pid) {
+            busySince[pid] = nil
+            let elapsed = t.timeIntervalSince(start)
+            guard sessionsPrimed, elapsed >= 20, UserDefaults.standard.bool(forKey: Pref.notifyTasks) else { continue }
+            let current = now.first { $0.pid == pid }
+            let name = current?.name ?? sessions.first { $0.pid == pid }?.name ?? "Claude Code"
+            let closed = current == nil
+            Notifier.post(L.t("✅ Task xong: \(name)", "✅ Task finished: \(name)"),
+                          L.t("Chạy trong \(formatDuration(elapsed))" + (closed ? " · phiên đã đóng" : ""),
+                              "Ran for \(formatDuration(elapsed))" + (closed ? " · session closed" : "")))
+        }
+        sessionsPrimed = true
     }
 
     var fiveHour: Limit? { limits.first { $0.kind == .fiveHour } }
@@ -123,6 +234,7 @@ final class UsageStore: ObservableObject {
             case .success(let l)?:
                 claudeLimits = l; error = nil; claudeBackoff = 0
                 Self.saveCachedClaude(l)
+                for x in l { forecasts[x.kind] = watcher.ingest(x) }
             case .failure(let e)?:
                 // Keep showing the last known numbers; back off when rate limited.
                 if case .rateLimited = e as? WidgetError {
@@ -137,7 +249,9 @@ final class UsageStore: ObservableObject {
             case nil: break
             }
             switch await cursor {
-            case .success(let l): cursorLimits = l; cursorError = nil
+            case .success(let l):
+                cursorLimits = l; cursorError = nil
+                for x in l { forecasts[x.kind] = watcher.ingest(x) }
             case .failure(let e): cursorError = (e as? WidgetError)?.text ?? e.localizedDescription
             }
             recompose()
@@ -369,6 +483,10 @@ enum Pref {
     static let showTokens = "showTokens"
     static let panelScreenID = "panelScreenID"
     static let language = "language"
+    static let notifyLimits = "notifyLimits"
+    static let notifyReset = "notifyReset"
+    static let notifyForecast = "notifyForecast"
+    static let notifyTasks = "notifyTasks"
 }
 
 // MARK: - Localization
@@ -561,6 +679,7 @@ enum Layout {
 struct RingGauge: View {
     let limit: Limit
     let showRemaining: Bool
+    var forecast: Forecast? = nil
 
     var value: Double { showRemaining ? limit.remaining : limit.used }
 
@@ -583,8 +702,8 @@ struct RingGauge: View {
                 .frame(height: 11)
         }
         .help(L.t(
-            "\(displayTitle(limit))\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\n(Bấm để mở cài đặt, kéo để di chuyển)",
-            "\(displayTitle(limit))\nUsed \(Int(limit.used.rounded()))% · \(Int(limit.remaining.rounded()))% left\nResets in \(countdown(to: limit.resetsAt)) — at \(resetClock(limit.resetsAt))\n(Click to open settings, drag to move)"
+            "\(displayTitle(limit))\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\(forecastText(forecast).map { "\n" + $0 } ?? "")\n(Bấm để mở cài đặt, kéo để di chuyển)",
+            "\(displayTitle(limit))\nUsed \(Int(limit.used.rounded()))% · \(Int(limit.remaining.rounded()))% left\nResets in \(countdown(to: limit.resetsAt)) — at \(resetClock(limit.resetsAt))\(forecastText(forecast).map { "\n" + $0 } ?? "")\n(Click to open settings, drag to move)"
         ))
     }
 }
@@ -864,7 +983,7 @@ struct SideWidgetView: View {
                 if store.limits.isEmpty {
                     placeholder
                 } else {
-                    ForEach(store.limits) { RingGauge(limit: $0, showRemaining: showRemaining) }
+                    ForEach(store.limits) { RingGauge(limit: $0, showRemaining: showRemaining, forecast: store.forecasts[$0.kind]) }
                 }
             }
             .padding(.leading, 2)
@@ -932,6 +1051,12 @@ enum SettingsMenu {
             if let checked { it.state = checked ? .on : .off }
             menu.addItem(it)
         }
+        if let u = store.update {
+            item(L.t("⬆︎ Có bản mới v\(u.version) — Tải về", "⬆︎ v\(u.version) available — Download")) {
+                NSWorkspace.shared.open(u.url)
+            }
+            menu.addItem(.separator())
+        }
         if let t = store.lastUpdate {
             let time = t.formatted(date: .omitted, time: .shortened)
             let info = NSMenuItem(title: L.t("Cập nhật lúc \(time)", "Updated at \(time)"), action: nil, keyEquivalent: "")
@@ -946,6 +1071,11 @@ enum SettingsMenu {
             let info = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             info.isEnabled = false
             menu.addItem(info)
+            if let f = forecastText(store.forecasts[l.kind]) {
+                let fi = NSMenuItem(title: "     " + f, action: nil, keyEquivalent: "")
+                fi.isEnabled = false
+                menu.addItem(fi)
+            }
         }
         let tk = store.tokens
         let tokTitle = L.t(
@@ -1031,7 +1161,41 @@ enum SettingsMenu {
         item(L.t("Hiện trên menu bar", "Show in menu bar"), checked: d.bool(forKey: Pref.showMenuBar)) {
             d.set(!d.bool(forKey: Pref.showMenuBar), forKey: Pref.showMenuBar)
         }
+        do {
+            let notifMenu = NSMenu()
+            let toggles: [(String, String, String)] = [
+                (Pref.notifyLimits, "Limit chạm 80% / 95%", "Limit reaches 80% / 95%"),
+                (Pref.notifyReset, "Limit vừa reset", "Limit has reset"),
+                (Pref.notifyForecast, "Cảnh báo sớm (dự báo sắp hết)", "Early warning (forecast)"),
+                (Pref.notifyTasks, "Task Claude Code chạy xong", "Claude Code task finished"),
+            ]
+            for (key, vi, en) in toggles {
+                let h = Handler { d.set(!d.bool(forKey: key), forKey: key) }
+                handlers.append(h)
+                let it = NSMenuItem(title: L.t(vi, en), action: #selector(Handler.run), keyEquivalent: "")
+                it.target = h
+                it.state = d.bool(forKey: key) ? .on : .off
+                notifMenu.addItem(it)
+            }
+            notifMenu.addItem(.separator())
+            let h = Handler {
+                Notifier.post(L.t("🔔 Thông báo thử", "🔔 Test notification"),
+                              L.t("Thông báo của AiUsage đang hoạt động.", "AiUsage notifications are working."))
+            }
+            handlers.append(h)
+            let test = NSMenuItem(title: L.t("Gửi thông báo thử", "Send test notification"), action: #selector(Handler.run), keyEquivalent: "")
+            test.target = h
+            notifMenu.addItem(test)
+            let notifItem = NSMenuItem(title: L.t("Thông báo", "Notifications"), action: nil, keyEquivalent: "")
+            notifItem.submenu = notifMenu
+            menu.addItem(notifItem)
+        }
+        item(L.t("Tự chạy khi mở máy", "Launch at login"), checked: LoginItem.isEnabled) { LoginItem.toggle() }
         menu.addItem(.separator())
+        item(L.t("Kiểm tra bản mới…", "Check for updates…")) { store.checkForUpdate(manual: true) }
+        let ver = NSMenuItem(title: "AiUsage v\(UsageStore.appVersion)", action: nil, keyEquivalent: "")
+        ver.isEnabled = false
+        menu.addItem(ver)
         item(L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
@@ -1151,7 +1315,20 @@ struct MenuPanel: View {
                     Text(L.t("Reset lúc \(resetClock(l.resetsAt))", "Resets at \(resetClock(l.resetsAt))"))
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundStyle(.secondary)
+                    if let f = store.forecasts[l.kind], let text = forecastText(f) {
+                        Text(text)
+                            .font(.system(size: 10))
+                            .foregroundStyle(f.hitsBeforeReset ? Color.orange : Color.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
+            }
+            if let u = store.update {
+                Button(L.t("⬆︎ Có bản mới v\(u.version) — Tải về", "⬆︎ v\(u.version) available — Download")) {
+                    NSWorkspace.shared.open(u.url)
+                }
+                .buttonStyle(.link)
+                .font(.system(size: 11))
             }
             Divider()
             HStack {
@@ -1166,11 +1343,262 @@ struct MenuPanel: View {
     }
 }
 
+// MARK: - Notifications
+
+@MainActor
+enum Notifier {
+    /// Ad-hoc signed builds can be refused by UserNotifications; fall back to AppleScript then.
+    private static var useFallback = false
+
+    static func setup() {
+        let c = UNUserNotificationCenter.current()
+        c.delegate = NotificationDelegate.shared
+        c.requestAuthorization(options: [.alert, .sound]) { _, error in
+            if error != nil { Task { @MainActor in useFallback = true } }
+        }
+    }
+
+    static func post(_ title: String, _ body: String, url: URL? = nil) {
+        if useFallback { fallback(title, body); return }
+        let c = UNUserNotificationCenter.current()
+        c.getNotificationSettings { settings in
+            // Respect an explicit "off" in System Settings.
+            guard settings.authorizationStatus != .denied else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            if let url { content.userInfo = ["url": url.absoluteString] }
+            let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(req) { error in
+                if error != nil {
+                    Task { @MainActor in
+                        useFallback = true
+                        fallback(title, body)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func fallback(_ title: String, _ body: String) {
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", "display notification \"\(esc(body))\" with title \"AiUsage\" subtitle \"\(esc(title))\""]
+        try? p.run()
+    }
+}
+
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = NotificationDelegate()
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let s = response.notification.request.content.userInfo["url"] as? String, let url = URL(string: s) {
+            NSWorkspace.shared.open(url)
+        }
+        completionHandler()
+    }
+}
+
+func formatDuration(_ seconds: TimeInterval) -> String {
+    let s = Int(seconds)
+    let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+    if L.current == .vi {
+        if h > 0 { return "\(h)g \(m)p" }
+        return m > 0 ? "\(m)p \(sec)s" : "\(sec)s"
+    }
+    if h > 0 { return "\(h)h \(m)m" }
+    return m > 0 ? "\(m)m \(sec)s" : "\(sec)s"
+}
+
+// MARK: - Limit watcher & forecast
+
+struct AppUpdate: Equatable {
+    let version: String
+    let url: URL
+}
+
+struct Forecast: Equatable {
+    let ratePerHour: Double     // percentage points per hour
+    let hitAt: Date?            // when usage would reach 100% at this pace
+    let resetsAt: Date?
+    var hitsBeforeReset: Bool {
+        guard let hitAt else { return false }
+        return resetsAt.map { hitAt < $0 } ?? true
+    }
+}
+
+/// "HH:mm" in GMT+7, adding the weekday/date when it isn't today.
+func clockShort(_ date: Date) -> String {
+    let tz = TimeZone(secondsFromGMT: 7 * 3600)!
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = tz
+    let f = DateFormatter()
+    f.locale = Locale(identifier: L.current == .vi ? "vi_VN" : "en_US")
+    f.timeZone = tz
+    f.dateFormat = cal.isDate(date, inSameDayAs: Date()) ? "HH:mm" : "HH:mm EEE dd/MM"
+    return f.string(from: date)
+}
+
+func forecastText(_ f: Forecast?) -> String? {
+    guard let f else { return nil }
+    guard f.ratePerHour > 0 else { return L.t("Tốc độ: chưa tăng gần đây", "Pace: flat recently") }
+    let rate = String(format: "%.1f", f.ratePerHour)
+    if f.hitsBeforeReset, let hit = f.hitAt {
+        let early = f.resetsAt.map { countdown(to: $0, now: hit) }
+        return L.t("⚠︎ Tốc độ ~\(rate)%/giờ → chạm 100% lúc \(clockShort(hit))" + (early.map { ", trước reset \($0)" } ?? ""),
+                   "⚠︎ Pace ~\(rate)%/h → hits 100% at \(clockShort(hit))" + (early.map { ", \($0) before reset" } ?? ""))
+    }
+    return L.t("Tốc độ ~\(rate)%/giờ — đủ dùng đến lúc reset", "Pace ~\(rate)%/h — lasts until reset")
+}
+
+/// Tracks each limit across polls: threshold/reset notifications and pace forecast.
+/// State survives restarts so the same alert isn't sent twice in one window.
+@MainActor
+final class LimitWatcher {
+    private struct Sample: Codable { let t: Date; let used: Double }
+    private struct Track: Codable {
+        var window: String          // identifies the current reset window
+        var samples: [Sample] = []
+        var flags = 0               // 1 = 80% sent, 2 = 95% sent, 4 = early warning sent
+        var lastUsed: Double
+    }
+
+    private let storeKey = "limitWatcher"
+    private var tracks: [String: Track]
+
+    init() {
+        tracks = (UserDefaults.standard.data(forKey: storeKey))
+            .flatMap { try? JSONDecoder().decode([String: Track].self, from: $0) } ?? [:]
+    }
+
+    private func save() {
+        if let d = try? JSONEncoder().encode(tracks) { UserDefaults.standard.set(d, forKey: storeKey) }
+    }
+
+    /// resets_at carries sub-second noise between polls; bucket it to 10 minutes.
+    private func windowID(_ l: Limit) -> String {
+        l.resetsAt.map { String(Int(($0.timeIntervalSince1970 / 600).rounded())) } ?? "none"
+    }
+
+    func ingest(_ l: Limit) -> Forecast? {
+        let d = UserDefaults.standard
+        let key = l.kind.rawValue
+        let win = windowID(l)
+        let now = Date()
+        let title = displayTitle(l)
+        var t = tracks[key] ?? Track(window: win, lastUsed: l.used)
+
+        if t.window != win {
+            // New window. If it was fairly used and dropped, tell the user they can go again.
+            if t.lastUsed >= 50, l.used < t.lastUsed - 10, d.bool(forKey: Pref.notifyReset) {
+                Notifier.post(L.t("🔄 \(title) đã reset", "🔄 \(title) has reset"),
+                              L.t("Giờ còn \(Int(l.remaining.rounded()))% — dùng tiếp được rồi.",
+                                  "\(Int(l.remaining.rounded()))% available again — you're good to go."))
+            }
+            t = Track(window: win, lastUsed: l.used)
+        }
+
+        if d.bool(forKey: Pref.notifyLimits) {
+            let resetInfo = l.resetsAt.map {
+                L.t("Reset sau \(countdown(to: $0)) — lúc \(resetClock($0))", "Resets in \(countdown(to: $0)) — at \(resetClock($0))")
+            } ?? ""
+            if l.used >= 95, t.flags & 2 == 0 {
+                t.flags |= 3
+                Notifier.post(L.t("🔴 \(title): đã dùng \(Int(l.used.rounded()))%", "🔴 \(title): \(Int(l.used.rounded()))% used"),
+                              resetInfo)
+            } else if l.used >= 80, t.flags & 1 == 0 {
+                t.flags |= 1
+                Notifier.post(L.t("🟠 \(title): đã dùng \(Int(l.used.rounded()))%", "🟠 \(title): \(Int(l.used.rounded()))% used"),
+                              resetInfo)
+            }
+        }
+
+        t.samples.append(Sample(t: now, used: l.used))
+        let keep: TimeInterval = l.kind == .fiveHour ? 6 * 3600 : 3 * 86400
+        t.samples.removeAll { now.timeIntervalSince($0.t) > keep }
+        if t.samples.count > 400 { t.samples.removeFirst(t.samples.count - 400) }
+        t.lastUsed = l.used
+
+        let f = forecast(t, l, now: now)
+        if let f, f.hitsBeforeReset, let hit = f.hitAt, l.used >= 50, l.used < 95,
+           t.flags & 4 == 0, d.bool(forKey: Pref.notifyForecast) {
+            t.flags |= 4
+            let early = l.resetsAt.map { countdown(to: $0, now: hit) } ?? "—"
+            Notifier.post(L.t("⏳ \(title) sắp hết", "⏳ \(title) running out"),
+                          L.t("Với tốc độ hiện tại sẽ chạm 100% lúc \(clockShort(hit)), trước reset \(early). Nên chậm lại hoặc dùng model nhẹ hơn.",
+                              "At this pace you'll hit 100% at \(clockShort(hit)), \(early) before reset. Consider slowing down or a lighter model."))
+        }
+
+        tracks[key] = t
+        save()
+        return f
+    }
+
+    /// Pace = change over a recent lookback (1 h for the 5-hour limit, 24 h for weekly/monthly).
+    /// Needs a minimum span so a single jump doesn't produce a wild estimate.
+    private func forecast(_ t: Track, _ l: Limit, now: Date) -> Forecast? {
+        let short = l.kind == .fiveHour
+        let lookback: TimeInterval = short ? 3600 : 86400
+        let minSpan: TimeInterval = short ? 15 * 60 : 2 * 3600
+        guard let last = t.samples.last,
+              let first = t.samples.first(where: { now.timeIntervalSince($0.t) <= lookback })
+        else { return nil }
+        let span = last.t.timeIntervalSince(first.t)
+        guard span >= minSpan else { return nil }
+        let rate = (last.used - first.used) / span * 3600
+        guard rate > 0.05 else { return Forecast(ratePerHour: 0, hitAt: nil, resetsAt: l.resetsAt) }
+        let hit = now.addingTimeInterval(max(0, 100 - l.used) / rate * 3600)
+        return Forecast(ratePerHour: rate, hitAt: hit, resetsAt: l.resetsAt)
+    }
+}
+
+// MARK: - Launch at login
+
+@MainActor
+enum LoginItem {
+    static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
+
+    static func toggle() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = L.t("Không bật được tự chạy khi mở máy", "Couldn't change Launch at login")
+            alert.informativeText = L.t("Hãy chắc app nằm trong thư mục Applications. Lỗi: \(error.localizedDescription)",
+                                        "Make sure the app is in the Applications folder. Error: \(error.localizedDescription)")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        if service.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
-        MainActor.assumeIsolated { SidePanel.shared.install(store: .shared) }
+        MainActor.assumeIsolated {
+            SidePanel.shared.install(store: .shared)
+            Notifier.setup()
+            UsageStore.shared.startUpdateChecks()
+        }
     }
 }
 
@@ -1191,6 +1619,10 @@ struct AiUsageApp: App {
             Pref.showTasks: true,
             Pref.showTokens: true,
             Pref.language: Lang.vi.rawValue,
+            Pref.notifyLimits: true,
+            Pref.notifyReset: true,
+            Pref.notifyForecast: true,
+            Pref.notifyTasks: true,
         ])
     }
 

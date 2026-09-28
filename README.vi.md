@@ -39,6 +39,8 @@ Widget macOS native theo dõi limit Claude Code và Cursor, số task đang ch�
 | ⚪ | **Usage Cursor** | % usage của gói trong chu kỳ thanh toán hiện tại. *Đang thử nghiệm.* |
 | 🟢 | **Task đang chạy** | Số phiên Claude Code trên máy này đang làm việc. |
 | 🔥 | **Token hôm nay** | Tổng token Claude Code đã dùng trong ngày, có chi tiết input, output và cache. Ngọn lửa cháy nhanh hơn khi có task đang chạy. |
+| 🔔 | **Thông báo thông minh** | Báo khi limit chạm 80% / 95%, khi limit vừa reset, cảnh báo sớm khi với tốc độ hiện tại sẽ hết trước giờ reset, và báo khi một task Claude Code chạy xong (kèm tên phiên và thời gian chạy). |
+| 📈 | **Dự báo tốc độ** | Ước tính tốc độ tiêu thụ và thời điểm chạm 100%, ví dụ *"~20%/giờ → chạm 100% lúc 16:40, trước reset 1g"*. |
 | 🪟 | **Gọn, không vướng** | Tab rộng 40 px bám mép màn hình. Kéo lên xuống để đổi vị trí, chọn màn hình, hoặc chỉ hiện trên desktop. |
 | 🌐 | **Song ngữ** | Giao diện tiếng Việt và tiếng Anh, không phụ thuộc ngôn ngữ của macOS. |
 | ⚡️ | **Nhẹ** | Viết bằng SwiftUI + Core Animation, không dùng thư viện ngoài. CPU gần 0% khi rảnh. Chỉ một file thực thi universal khoảng 1 MB. |
@@ -85,6 +87,9 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 | Hiện số task đang chạy | Bật/tắt badge task |
 | Hiện Cursor | Bật/tắt vòng Cursor |
 | Hiện trên menu bar | Bật/tắt icon trên menu bar |
+| Thông báo | Chọn loại thông báo muốn nhận, gửi thông báo thử |
+| Tự chạy khi mở máy | Tự khởi động AiUsage khi đăng nhập máy |
+| Kiểm tra bản mới… | Kiểm tra GitHub Releases ngay. App cũng tự kiểm tra mỗi 6 giờ. |
 | Thoát | Thoát AiUsage |
 
 ## Cách hoạt động
@@ -98,12 +103,16 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 **Phạm vi.** Limit tính theo tài khoản nên luôn đúng dù bạn dùng ở đâu. *Task đang chạy* và *token hôm nay* chỉ tính Claude Code trên máy này, gồm tab Code của app desktop, CLI và extension IDE. Không tính chat trên claude.ai hay các máy khác.
 
+**Dự báo.** Tốc độ được tính từ mức thay đổi usage trong 1 giờ gần nhất (limit 5 giờ) hoặc 24 giờ gần nhất (limit tuần, tháng). Cần ít nhất 15 phút hoặc 2 giờ dữ liệu thì mới hiện dự báo.
+
+**Khi máy thức dậy.** AiUsage làm mới toàn bộ số liệu vài giây sau khi mở nắp máy.
+
 **Giới hạn tần suất.** Nếu API Claude trả lỗi HTTP 429, AiUsage vẫn hiện số liệu gần nhất và chờ lâu dần trước khi thử lại, bắt đầu từ 2 phút và tối đa 15 phút.
 
 ## Quyền riêng tư & bảo mật
 
 - **Chỉ đọc.** AiUsage không sửa gì trong Keychain hay dữ liệu của Claude Code và Cursor.
-- **Không thu thập dữ liệu.** App chỉ gửi request tới hai endpoint usage ở trên.
+- **Không thu thập dữ liệu.** App chỉ gửi request tới hai endpoint usage ở trên và API GitHub Releases để kiểm tra bản mới.
 - **Token chỉ nằm trong bộ nhớ.** Thông tin đăng nhập được đọc khi cần, không bao giờ ghi ra ổ đĩa hay log.
 - **Dễ kiểm tra.** Toàn bộ app nằm trong một file Swift ([`AiUsage.swift`](AiUsage.swift)).
 
