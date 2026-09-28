@@ -1276,180 +1276,190 @@ enum SettingsMenu {
     }
     private static var handlers: [Handler] = []
 
+    // MARK: Builders
+
+    @discardableResult
+    private static func action(_ menu: NSMenu, _ title: String, checked: Bool? = nil,
+                               _ run: @escaping () -> Void) -> NSMenuItem {
+        let h = Handler(run)
+        handlers.append(h)
+        let it = NSMenuItem(title: title, action: #selector(Handler.run), keyEquivalent: "")
+        it.target = h
+        if let checked { it.state = checked ? .on : .off }
+        menu.addItem(it)
+        return it
+    }
+
+    /// Greyed-out informational line.
+    private static func info(_ menu: NSMenu, _ title: String) {
+        let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        it.isEnabled = false
+        menu.addItem(it)
+    }
+
+    private static func submenu(_ menu: NSMenu, _ title: String, _ build: @MainActor (NSMenu) -> Void) {
+        let sub = NSMenu()
+        build(sub)
+        let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        it.submenu = sub
+        menu.addItem(it)
+    }
+
+    /// "Label ........ value" row with the value right-aligned in a secondary color;
+    /// details go in a submenu so the main menu stays one line per item.
+    private static func row(_ menu: NSMenu, _ label: String, _ value: String, details: [String]) {
+        let para = NSMutableParagraphStyle()
+        para.tabStops = [NSTextTab(textAlignment: .right, location: 250)]
+        let title = NSMutableAttributedString(string: label + "\t",
+                                              attributes: [.font: NSFont.menuFont(ofSize: 0), .paragraphStyle: para])
+        title.append(NSAttributedString(string: value, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: para,
+        ]))
+        let it = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+        it.attributedTitle = title
+        if !details.isEmpty {
+            let sub = NSMenu()
+            details.forEach { info(sub, $0) }
+            it.submenu = sub
+        }
+        menu.addItem(it)
+    }
+
+    private static func pct(_ l: Limit) -> String {
+        let v = UserDefaults.standard.bool(forKey: Pref.showRemaining) ? l.remaining : l.used
+        return "\(Int(v.rounded()))%"
+    }
+
+    private static func limitDetails(_ l: Limit, _ f: Forecast?) -> [String] {
+        var lines = [
+            L.t("Đã dùng \(Int(l.used.rounded()))% · còn \(Int(l.remaining.rounded()))%",
+                "Used \(Int(l.used.rounded()))% · \(Int(l.remaining.rounded()))% left"),
+            L.t("Reset sau \(countdown(to: l.resetsAt))", "Resets in \(countdown(to: l.resetsAt))"),
+            L.t("Lúc \(resetClock(l.resetsAt))", "At \(resetClock(l.resetsAt))"),
+        ]
+        if let t = forecastText(f) { lines.append(t) }
+        return lines
+    }
+
+    // MARK: Menu
+
     static func show(store: UsageStore) {
         handlers.removeAll()
         let d = UserDefaults.standard
         let menu = NSMenu()
-        func item(_ title: String, checked: Bool? = nil, _ action: @escaping () -> Void) {
-            let h = Handler(action)
-            handlers.append(h)
-            let it = NSMenuItem(title: title, action: #selector(Handler.run), keyEquivalent: "")
-            it.target = h
-            if let checked { it.state = checked ? .on : .off }
-            menu.addItem(it)
-        }
+
         if let u = store.update {
-            item(L.t("⬆︎ Có bản mới v\(u.version) — Tải về", "⬆︎ v\(u.version) available — Download")) {
+            action(menu, L.t("⬆︎ Có bản mới v\(u.version) — Tải về", "⬆︎ v\(u.version) available — Download")) {
                 NSWorkspace.shared.open(u.url)
             }
             menu.addItem(.separator())
         }
-        if let t = store.lastUpdate {
-            let time = t.formatted(date: .omitted, time: .shortened)
-            let info = NSMenuItem(title: L.t("Cập nhật lúc \(time)", "Updated at \(time)"), action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            menu.addItem(info)
-        }
+
+        // Usage — one line each, details in submenus.
         if !store.accounts.isEmpty, let def = store.defaultAccount {
-            let h = NSMenuItem(title: "👤 " + def.label + L.t(" (tài khoản chính)", " (main account)"), action: nil, keyEquivalent: "")
-            h.isEnabled = false
-            menu.addItem(h)
+            menu.addItem(.sectionHeader(title: def.label))
         }
         for l in store.limits {
-            let title = L.t(
-                "\(displayTitle(l)): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))",
-                "\(displayTitle(l)): \(Int(l.used.rounded()))% used · resets in \(countdown(to: l.resetsAt)) — at \(resetClock(l.resetsAt))"
-            )
-            let info = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            menu.addItem(info)
-            if let f = forecastText(store.forecasts[l.kind]) {
-                let fi = NSMenuItem(title: "     " + f, action: nil, keyEquivalent: "")
-                fi.isEnabled = false
-                menu.addItem(fi)
-            }
+            let f = store.forecasts[l.kind]
+            let warn = f?.hitsBeforeReset == true ? "⚠︎ " : ""
+            row(menu, displayTitle(l), "\(warn)\(pct(l)) · \(countdown(to: l.resetsAt))", details: limitDetails(l, f))
+        }
+        if !store.accounts.isEmpty {
+            menu.addItem(.sectionHeader(title: L.t("Tài khoản khác", "Other accounts")))
         }
         for u in store.accounts {
-            menu.addItem(.separator())
-            for line in accountTooltip(u).split(separator: "\n").dropLast() {
-                let it = NSMenuItem(title: String(line), action: nil, keyEquivalent: "")
-                it.isEnabled = false
-                menu.addItem(it)
-            }
+            let five = u.limit(.fiveHour).map(pct) ?? "–"
+            let week = u.limit(.week).map(pct) ?? "–"
+            let value = u.limits.isEmpty && u.error != nil ? "⚠︎" : "5h \(five) · 7d \(week)"
+            let name = u.account.label.count > 26 ? String(u.account.label.prefix(25)) + "…" : u.account.label
+            row(menu, "👤 " + name, value, details: accountTooltip(u).split(separator: "\n").dropFirst().dropLast().map(String.init))
         }
-        if !store.accounts.isEmpty { menu.addItem(.separator()) }
+
+        // Activity
         let tk = store.tokens
-        let tokTitle = L.t(
-            "Token hôm nay: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache đọc \(formatTokens(tk.cacheRead)))",
-            "Tokens today: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache read \(formatTokens(tk.cacheRead)))"
-        )
-        let tokItem = NSMenuItem(title: tokTitle, action: nil, keyEquivalent: "")
-        tokItem.isEnabled = false
-        menu.addItem(tokItem)
         let running = store.runningSessions
-        let headTitle = L.t(
-            "Claude Code: \(running.count) đang chạy · \(store.sessions.count - running.count) rảnh",
-            "Claude Code: \(running.count) running · \(store.sessions.count - running.count) idle"
-        )
-        let head = NSMenuItem(title: headTitle, action: nil, keyEquivalent: "")
-        head.isEnabled = false
-        menu.addItem(head)
-        for s in running {
-            let it = NSMenuItem(title: "   ▶ \(s.name)", action: nil, keyEquivalent: "")
-            it.isEnabled = false
-            menu.addItem(it)
+        var activity = [
+            L.t("Tổng: \(tk.total.formatted())", "Total: \(tk.total.formatted())"),
+            "Output: \(tk.output.formatted())",
+            L.t("Cache đọc: \(tk.cacheRead.formatted())", "Cache read: \(tk.cacheRead.formatted())"),
+            L.t("\(store.sessions.count) phiên đang mở · \(running.count) đang chạy",
+                "\(store.sessions.count) open sessions · \(running.count) running"),
+        ]
+        activity += running.map { "▶ \($0.name)" }
+        row(menu, L.t("🔥 Hôm nay", "🔥 Today"), "\(formatTokens(tk.total)) · ▶ \(running.count)", details: activity)
+
+        let errors = [store.error, store.cursorError].compactMap { $0 }
+        if !errors.isEmpty {
+            submenu(menu, L.t("⚠︎ Có \(errors.count) lỗi", "⚠︎ \(errors.count) issue(s)")) { m in errors.forEach { info(m, $0) } }
         }
-        for e in [store.error, store.cursorError].compactMap({ $0 }) {
-            let info = NSMenuItem(title: "⚠︎ \(e)", action: nil, keyEquivalent: "")
-            info.isEnabled = false
-            menu.addItem(info)
-        }
+
         menu.addItem(.separator())
-        item(L.t("📊 Biểu đồ token…", "📊 Token chart…")) { ChartWindow.show() }
-        item(L.t("Làm mới", "Refresh")) { store.refresh() }
-        item(L.t("Hiển thị % còn lại", "Show % remaining"), checked: d.bool(forKey: Pref.showRemaining)) {
-            d.set(!d.bool(forKey: Pref.showRemaining), forKey: Pref.showRemaining)
+        action(menu, L.t("📊 Biểu đồ token…", "📊 Token chart…")) { ChartWindow.show() }
+        let refresh = action(menu, L.t("Làm mới", "Refresh")) { store.refresh() }
+        if let t = store.lastUpdate {
+            refresh.toolTip = L.t("Cập nhật lúc ", "Updated at ") + t.formatted(date: .omitted, time: .shortened)
         }
-        item(L.t("Luôn nằm trên cửa sổ khác", "Always on top of other windows"), checked: d.bool(forKey: Pref.alwaysOnTop)) {
-            d.set(!d.bool(forKey: Pref.alwaysOnTop), forKey: Pref.alwaysOnTop)
-            SidePanel.shared.applyLevel()
-        }
-        do {
-            let langMenu = NSMenu()
-            for lang in [Lang.vi, .en] {
-                let h = Handler { d.set(lang.rawValue, forKey: Pref.language) }
-                handlers.append(h)
-                let it = NSMenuItem(title: lang == .vi ? "Tiếng Việt" : "English",
-                                     action: #selector(Handler.run), keyEquivalent: "")
-                it.target = h
-                it.state = L.current == lang ? .on : .off
-                langMenu.addItem(it)
+
+        menu.addItem(.separator())
+        submenu(menu, L.t("Cài đặt", "Settings")) { m in
+            @MainActor func toggle(_ title: String, _ key: String, _ after: @escaping () -> Void = {}) {
+                action(m, title, checked: d.bool(forKey: key)) { d.set(!d.bool(forKey: key), forKey: key); after() }
             }
-            let langItem = NSMenuItem(title: "Ngôn ngữ / Language", action: nil, keyEquivalent: "")
-            langItem.submenu = langMenu
-            menu.addItem(langItem)
-        }
-        if NSScreen.screens.count > 1 {
-            let screenMenu = NSMenu()
-            let current = SidePanel.shared.selectedScreen ?? NSScreen.main
-            for (i, s) in NSScreen.screens.enumerated() {
-                guard let id = SidePanel.displayID(for: s) else { continue }
-                let h = Handler {
-                    d.set(Int(id), forKey: Pref.panelScreenID)
-                    SidePanel.shared.layout()
+            m.addItem(.sectionHeader(title: L.t("Hiển thị", "Display")))
+            toggle(L.t("% còn lại thay vì đã dùng", "% remaining instead of used"), Pref.showRemaining)
+            toggle(L.t("Token hôm nay", "Today's tokens"), Pref.showTokens) { SidePanel.shared.layout() }
+            toggle(L.t("Số task đang chạy", "Running task count"), Pref.showTasks) { SidePanel.shared.layout() }
+            toggle("Cursor", Pref.showCursor) { store.recompose() }
+            toggle(L.t("Icon trên menu bar", "Menu bar icon"), Pref.showMenuBar)
+            toggle(L.t("Luôn nằm trên cửa sổ khác", "Always on top"), Pref.alwaysOnTop) { SidePanel.shared.applyLevel() }
+            if NSScreen.screens.count > 1 {
+                submenu(m, L.t("Màn hình", "Display")) { sm in
+                    let current = SidePanel.shared.selectedScreen ?? NSScreen.main
+                    for (i, scr) in NSScreen.screens.enumerated() {
+                        guard let id = SidePanel.displayID(for: scr) else { continue }
+                        action(sm, L.t("Màn hình \(i + 1)", "Display \(i + 1)"), checked: scr == current) {
+                            d.set(Int(id), forKey: Pref.panelScreenID)
+                            SidePanel.shared.layout()
+                        }
+                    }
                 }
-                handlers.append(h)
-                let it = NSMenuItem(title: L.t("Màn hình \(i + 1)", "Display \(i + 1)"), action: #selector(Handler.run), keyEquivalent: "")
-                it.target = h
-                it.state = s == current ? .on : .off
-                screenMenu.addItem(it)
             }
-            let screenItem = NSMenuItem(title: L.t("Hiển thị trên màn hình", "Show on display"), action: nil, keyEquivalent: "")
-            screenItem.submenu = screenMenu
-            menu.addItem(screenItem)
-        }
-        item(L.t("Hiện token hôm nay", "Show today's tokens"), checked: d.bool(forKey: Pref.showTokens)) {
-            d.set(!d.bool(forKey: Pref.showTokens), forKey: Pref.showTokens)
-            SidePanel.shared.layout()
-        }
-        item(L.t("Hiện số task đang chạy", "Show running task count"), checked: d.bool(forKey: Pref.showTasks)) {
-            d.set(!d.bool(forKey: Pref.showTasks), forKey: Pref.showTasks)
-            SidePanel.shared.layout()
-        }
-        item(L.t("Hiện Cursor", "Show Cursor"), checked: d.bool(forKey: Pref.showCursor)) {
-            d.set(!d.bool(forKey: Pref.showCursor), forKey: Pref.showCursor)
-            store.recompose()
-        }
-        item(L.t("Hiện trên menu bar", "Show in menu bar"), checked: d.bool(forKey: Pref.showMenuBar)) {
-            d.set(!d.bool(forKey: Pref.showMenuBar), forKey: Pref.showMenuBar)
-        }
-        do {
-            let notifMenu = NSMenu()
-            let toggles: [(String, String, String)] = [
-                (Pref.notifyLimits, "Limit chạm 80% / 95%", "Limit reaches 80% / 95%"),
-                (Pref.notifyReset, "Limit vừa reset", "Limit has reset"),
-                (Pref.notifyForecast, "Cảnh báo sớm (dự báo sắp hết)", "Early warning (forecast)"),
-                (Pref.notifyTasks, "Task Claude Code chạy xong", "Claude Code task finished"),
-            ]
-            for (key, vi, en) in toggles {
-                let h = Handler { d.set(!d.bool(forKey: key), forKey: key) }
-                handlers.append(h)
-                let it = NSMenuItem(title: L.t(vi, en), action: #selector(Handler.run), keyEquivalent: "")
-                it.target = h
-                it.state = d.bool(forKey: key) ? .on : .off
-                notifMenu.addItem(it)
+            m.addItem(.separator())
+            submenu(m, L.t("Thông báo", "Notifications")) { nm in
+                toggle2(nm, L.t("Limit chạm 80% / 95%", "Limit reaches 80% / 95%"), Pref.notifyLimits)
+                toggle2(nm, L.t("Limit vừa reset", "Limit has reset"), Pref.notifyReset)
+                toggle2(nm, L.t("Cảnh báo sớm (dự báo)", "Early warning (forecast)"), Pref.notifyForecast)
+                toggle2(nm, L.t("Task Claude Code chạy xong", "Claude Code task finished"), Pref.notifyTasks)
+                nm.addItem(.separator())
+                action(nm, L.t("Gửi thông báo thử", "Send test notification")) {
+                    Notifier.post(L.t("🔔 Thông báo thử", "🔔 Test notification"),
+                                  L.t("Thông báo của AiUsage đang hoạt động.", "AiUsage notifications are working."))
+                }
             }
-            notifMenu.addItem(.separator())
-            let h = Handler {
-                Notifier.post(L.t("🔔 Thông báo thử", "🔔 Test notification"),
-                              L.t("Thông báo của AiUsage đang hoạt động.", "AiUsage notifications are working."))
+            submenu(m, "Ngôn ngữ / Language") { lm in
+                for lang in [Lang.vi, .en] {
+                    action(lm, lang == .vi ? "Tiếng Việt" : "English", checked: L.current == lang) {
+                        d.set(lang.rawValue, forKey: Pref.language)
+                    }
+                }
             }
-            handlers.append(h)
-            let test = NSMenuItem(title: L.t("Gửi thông báo thử", "Send test notification"), action: #selector(Handler.run), keyEquivalent: "")
-            test.target = h
-            notifMenu.addItem(test)
-            let notifItem = NSMenuItem(title: L.t("Thông báo", "Notifications"), action: nil, keyEquivalent: "")
-            notifItem.submenu = notifMenu
-            menu.addItem(notifItem)
+            action(m, L.t("Tự chạy khi mở máy", "Launch at login"), checked: LoginItem.isEnabled) { LoginItem.toggle() }
         }
-        item(L.t("Tự chạy khi mở máy", "Launch at login"), checked: LoginItem.isEnabled) { LoginItem.toggle() }
-        menu.addItem(.separator())
-        item(L.t("Kiểm tra bản mới…", "Check for updates…")) { store.checkForUpdate(manual: true) }
-        let ver = NSMenuItem(title: "AiUsage v\(UsageStore.appVersion)", action: nil, keyEquivalent: "")
-        ver.isEnabled = false
-        menu.addItem(ver)
-        item(L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
+        submenu(menu, "AiUsage v\(UsageStore.appVersion)") { m in
+            action(m, L.t("Kiểm tra bản mới…", "Check for updates…")) { store.checkForUpdate(manual: true) }
+            action(m, L.t("Mở trang GitHub", "Open on GitHub")) {
+                NSWorkspace.shared.open(URL(string: "https://github.com/RYG-Labs/AiUsage")!)
+            }
+        }
+        action(menu, L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private static func toggle2(_ m: NSMenu, _ title: String, _ key: String) {
+        let d = UserDefaults.standard
+        action(m, title, checked: d.bool(forKey: key)) { d.set(!d.bool(forKey: key), forKey: key) }
     }
 }
 
