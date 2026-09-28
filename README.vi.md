@@ -43,6 +43,7 @@ Widget macOS native theo dõi limit Claude Code và Cursor, số task đang ch�
 | 👥 | **Nhiều tài khoản Claude** | Mỗi profile Claude Code phụ (`CLAUDE_CONFIG_DIR`) có một vòng gọn: vòng ngoài là limit 5 giờ, vòng trong là limit tuần, chữ cái đầu của tài khoản ở giữa. Token hết hạn được tự làm mới. |
 | 🔔 | **Thông báo thông minh** | Báo khi limit chạm 80% / 95%, khi limit vừa reset, cảnh báo sớm khi với tốc độ hiện tại sẽ hết trước giờ reset, và báo khi một task Claude Code chạy xong (kèm tên phiên và thời gian chạy). |
 | 📈 | **Dự báo tốc độ** | Ước tính tốc độ tiêu thụ và thời điểm chạm 100%, ví dụ *"~20%/giờ → chạm 100% lúc 16:40, trước reset 1g"*. |
+| 📊 | **Biểu đồ token** | Biểu đồ nhiệt kiểu GitHub cho token Claude Code: theo giờ trong 14 ngày gần nhất và theo ngày trong 6 tháng. Bấm vào bộ đếm 🔥 để mở. Có thể bỏ phần cache đọc. |
 | 🪟 | **Gọn, không vướng** | Tab rộng 40 px bám mép màn hình. Kéo lên xuống để đổi vị trí, chọn màn hình, hoặc chỉ hiện trên desktop. |
 | 🌐 | **Song ngữ** | Giao diện tiếng Việt và tiếng Anh, không phụ thuộc ngôn ngữ của macOS. |
 | ⚡️ | **Nhẹ** | Viết bằng SwiftUI + Core Animation, không dùng thư viện ngoài. CPU gần 0% khi rảnh. Chỉ một file thực thi universal khoảng 1 MB. |
@@ -74,6 +75,7 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 | --- | --- |
 | **Bấm** vào tab | Mở menu cài đặt, trong đó có cả số liệu chi tiết |
 | **Kéo** tab lên hoặc xuống | Đổi vị trí dọc mép màn hình. App nhớ vị trí này. |
+| **Bấm** vào bộ đếm 🔥 | Mở biểu đồ token |
 | **Rê chuột** lên vòng hoặc badge | Hiện tooltip: % đã dùng và còn lại, đếm ngược, giờ reset chính xác |
 
 ### Menu cài đặt

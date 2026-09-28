@@ -43,6 +43,7 @@ A native macOS side widget for Claude Code and Cursor usage limits, running task
 | 👥 | **Multiple Claude accounts** | Each extra Claude Code profile (`CLAUDE_CONFIG_DIR`) gets a compact ring: the outer ring is the 5-hour limit, the inner ring is the weekly limit, and the account initial sits in the middle. Expired tokens are refreshed automatically. |
 | 🔔 | **Smart notifications** | Alerts at 80% / 95%, when a limit resets, an early warning when your pace will run out before the reset, and when a Claude Code task finishes (with its name and duration). |
 | 📈 | **Pace forecast** | Estimates your burn rate and when you would hit 100% at the current pace, for example *"~20%/h → hits 100% at 16:40, 1h before reset"*. |
+| 📊 | **Token chart** | GitHub-style heatmaps of Claude Code tokens: by hour over the last 14 days, and by day over the last 6 months. Click the 🔥 counter to open it. You can exclude cache reads. |
 | 🪟 | **Unobtrusive** | 40 px wide tab docked to the screen edge. Drag it up or down, pick a display, or keep it on the desktop only. |
 | 🌐 | **Bilingual** | Vietnamese and English UI, independent of the macOS system language. |
 | ⚡️ | **Lightweight** | Native SwiftUI + Core Animation with no dependencies. Uses about 0% CPU when idle. Single ~1 MB universal binary. |
@@ -74,6 +75,7 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 | --- | --- |
 | **Click** the tab | Open the settings menu, which also shows detailed usage |
 | **Drag** the tab up or down | Move it along the screen edge. The position is remembered. |
+| **Click** the 🔥 token counter | Open the token chart |
 | **Hover** a ring or badge | Tooltip with used/remaining %, countdown and exact reset time |
 
 ### Settings menu

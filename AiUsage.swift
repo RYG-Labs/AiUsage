@@ -1211,7 +1211,11 @@ struct SideWidgetView: View {
             shape.fill(Color.black)
             VStack(spacing: Layout.ringSpacing) {
                 if showTasks { TaskBadge(store: store) }
-                if showTokens { TokenBadge(tokens: store.tokens, active: !store.runningSessions.isEmpty) }
+                if showTokens {
+                    TokenBadge(tokens: store.tokens, active: !store.runningSessions.isEmpty)
+                        .contentShape(Rectangle())
+                        .onTapGesture { ChartWindow.show() }
+                }
                 if store.limits.isEmpty {
                     placeholder
                 } else {
@@ -1351,6 +1355,7 @@ enum SettingsMenu {
             menu.addItem(info)
         }
         menu.addItem(.separator())
+        item(L.t("📊 Biểu đồ token…", "📊 Token chart…")) { ChartWindow.show() }
         item(L.t("Làm mới", "Refresh")) { store.refresh() }
         item(L.t("Hiển thị % còn lại", "Show % remaining"), checked: d.bool(forKey: Pref.showRemaining)) {
             d.set(!d.bool(forKey: Pref.showRemaining), forKey: Pref.showRemaining)
@@ -1585,6 +1590,7 @@ struct MenuPanel: View {
             }
             Divider()
             HStack {
+                Button(L.t("Biểu đồ", "Chart")) { ChartWindow.show() }
                 Button(L.t("Làm mới", "Refresh")) { store.refresh() }
                 Spacer()
                 Button(L.t("Thoát", "Quit")) { NSApp.terminate(nil) }
@@ -1840,6 +1846,364 @@ enum LoginItem {
         if service.status == .requiresApproval {
             SMAppService.openSystemSettingsLoginItems()
         }
+    }
+}
+
+// MARK: - Token history (chart)
+
+/// Hourly token totals across every Claude Code profile, built from the transcripts.
+/// Scans incrementally (byte offsets per file), so reopening the chart is instant.
+final class TokenHistory: @unchecked Sendable {
+    static let shared = TokenHistory()
+
+    struct Bucket: Equatable {
+        var total = 0          // input + output + cache write + cache read
+        var noCacheRead = 0    // input + output + cache write
+    }
+
+    private let queue = DispatchQueue(label: "token-history")
+    private var offsets: [String: UInt64] = [:]
+    private var seen = Set<String>()
+    private var buckets: [Int: Bucket] = [:]      // key: Unix hour (seconds / 3600)
+    private let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let usageMarker = Data("\"usage\"".utf8)
+
+    func scan(days: Int = 190) -> [Int: Bucket] {
+        queue.sync {
+            let since = Date().addingTimeInterval(-Double(days) * 86400)
+            for base in UsageStore.configDirs {
+                let root = URL(fileURLWithPath: base + "/projects")
+                guard let en = FileManager.default.enumerator(
+                    at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
+                for case let url as URL in en where url.pathExtension == "jsonl" {
+                    guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                          let mod = v.contentModificationDate, mod >= since,
+                          let size = v.fileSize else { continue }
+                    var offset = offsets[url.path] ?? 0
+                    if UInt64(size) < offset { offset = 0 }
+                    guard UInt64(size) > offset, let fh = try? FileHandle(forReadingFrom: url) else { continue }
+                    defer { try? fh.close() }
+                    try? fh.seek(toOffset: offset)
+                    guard let data = try? fh.readToEnd(), let lastNL = data.lastIndex(of: 0x0A) else { continue }
+                    offsets[url.path] = offset + UInt64(lastNL + 1)
+                    for line in data[..<lastNL].split(separator: 0x0A) { ingest(line, since: since) }
+                }
+            }
+            return buckets
+        }
+    }
+
+    private func ingest(_ line: Data.SubSequence, since: Date) {
+        guard line.range(of: Self.usageMarker) != nil,
+              let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+              obj["type"] as? String == "assistant",
+              let msg = obj["message"] as? [String: Any],
+              let u = msg["usage"] as? [String: Any],
+              let ts = (obj["timestamp"] as? String).flatMap(iso.date(from:)), ts >= since
+        else { return }
+        let key = "\(msg["id"] as? String ?? "")|\(obj["requestId"] as? String ?? "")"
+        guard seen.insert(key).inserted else { return }
+        func n(_ k: String) -> Int { (u[k] as? Int) ?? 0 }
+        let noCache = n("input_tokens") + n("output_tokens") + n("cache_creation_input_tokens")
+        let hour = Int(ts.timeIntervalSince1970 / 3600)
+        buckets[hour, default: Bucket()].noCacheRead += noCache
+        buckets[hour, default: Bucket()].total += noCache + n("cache_read_input_tokens")
+    }
+}
+
+@MainActor
+final class ChartModel: ObservableObject {
+    static let shared = ChartModel()
+    @Published var buckets: [Int: TokenHistory.Bucket] = [:]
+    @Published var loading = false
+    @Published var loaded = false
+
+    func load() {
+        guard !loading else { return }
+        loading = true
+        Task.detached(priority: .userInitiated) {
+            let b = TokenHistory.shared.scan()
+            await MainActor.run {
+                self.buckets = b
+                self.loading = false
+                self.loaded = true
+            }
+        }
+    }
+}
+
+/// GMT+7 calendar, matching the reset times shown elsewhere.
+let gmt7: Calendar = {
+    var c = Calendar(identifier: .gregorian)
+    c.timeZone = TimeZone(secondsFromGMT: 7 * 3600)!
+    c.firstWeekday = 2   // Monday
+    return c
+}()
+
+func weekdayShort(_ date: Date) -> String {
+    let w = gmt7.component(.weekday, from: date)   // 1 = Sunday
+    if L.current == .vi { return w == 1 ? "CN" : "T\(w)" }
+    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][w - 1]
+}
+
+func dayMonth(_ date: Date) -> String {
+    let c = gmt7.dateComponents([.day, .month], from: date)
+    return String(format: "%02d/%02d", c.day ?? 0, c.month ?? 0)
+}
+
+/// GitHub-style palette: level 0 = empty, 1…4 = more usage.
+struct HeatPalette {
+    let dark: Bool
+    func color(_ level: Int) -> Color {
+        let light = ["ebedf0", "9be9a8", "40c463", "30a14e", "216e39"]
+        let night = ["1f242c", "0e4429", "006d32", "26a641", "39d353"]
+        return Color(hex: (dark ? night : light)[max(0, min(4, level))])
+    }
+}
+
+extension Color {
+    init(hex: String) {
+        let v = UInt32(hex, radix: 16) ?? 0
+        self.init(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
+    }
+}
+
+/// Quartile thresholds over non-zero values, like GitHub's contribution graph.
+func heatThresholds(_ values: [Int]) -> [Int] {
+    let nz = values.filter { $0 > 0 }.sorted()
+    guard !nz.isEmpty else { return [1, 1, 1] }
+    func q(_ p: Double) -> Int { nz[min(nz.count - 1, Int(Double(nz.count - 1) * p))] }
+    return [q(0.25), q(0.5), q(0.75)]
+}
+
+func heatLevel(_ v: Int, _ t: [Int]) -> Int {
+    if v <= 0 { return 0 }
+    if v <= t[0] { return 1 }
+    if v <= t[1] { return 2 }
+    if v <= t[2] { return 3 }
+    return 4
+}
+
+struct TokenChartView: View {
+    @ObservedObject var model = ChartModel.shared
+    @Environment(\.colorScheme) private var scheme
+    @AppStorage("chartMode") private var mode = 0          // 0 = by hour, 1 = by day
+    @AppStorage("chartNoCache") private var noCache = false
+    @AppStorage(Pref.language) private var langRaw = Lang.vi.rawValue
+
+    private let hourDays = 14
+    private let calendarWeeks = 26
+    private let cell: CGFloat = 18
+
+    private func value(_ b: TokenHistory.Bucket?) -> Int {
+        guard let b else { return 0 }
+        return noCache ? b.noCacheRead : b.total
+    }
+
+    private var todayStart: Date { gmt7.startOfDay(for: Date()) }
+
+    private func dayTotal(_ day: Date) -> Int {
+        let h0 = Int(day.timeIntervalSince1970 / 3600)
+        return (0..<24).reduce(0) { $0 + value(model.buckets[h0 + $1]) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Picker("", selection: $mode) {
+                    Text(L.t("Theo giờ (14 ngày)", "By hour (14 days)")).tag(0)
+                    Text(L.t("Theo ngày (6 tháng)", "By day (6 months)")).tag(1)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 320)
+                Spacer()
+                Toggle(L.t("Bỏ cache đọc", "Exclude cache reads"), isOn: $noCache)
+                    .toggleStyle(.checkbox)
+                    .help(L.t("Cache đọc chiếm phần lớn token nhưng rẻ hơn nhiều. Bỏ đi để thấy mức dùng \"thật\".",
+                              "Cache reads are most tokens but much cheaper. Exclude them to see \"real\" usage."))
+                Button { model.load() } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless)
+                    .disabled(model.loading)
+            }
+
+            if !model.loaded {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(L.t("Đang đọc lịch sử Claude Code… (lần đầu có thể mất vài giây)",
+                             "Reading Claude Code history… (the first time can take a few seconds)"))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 280)
+            } else if mode == 0 {
+                hourGrid
+            } else {
+                dayGrid
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 720)
+        .onAppear { model.load() }
+    }
+
+    // MARK: By hour — rows = days, columns = hours
+
+    private var hourGrid: some View {
+        let days = (0..<hourDays).reversed().map { gmt7.date(byAdding: .day, value: -$0, to: todayStart)! }
+        let values = days.flatMap { d -> [Int] in
+            let h0 = Int(d.timeIntervalSince1970 / 3600)
+            return (0..<24).map { value(model.buckets[h0 + $0]) }
+        }
+        let t = heatThresholds(values)
+        let pal = HeatPalette(dark: scheme == .dark)
+        var hourSums = [Int](repeating: 0, count: 24)
+        for (i, v) in values.enumerated() { hourSums[i % 24] += v }
+        let peakHour = hourSums.indices.max { hourSums[$0] < hourSums[$1] } ?? 0
+        let total = values.reduce(0, +)
+        let busiest = days.max { dayTotal($0) < dayTotal($1) }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 3) {
+                Text("").frame(width: 76)
+                ForEach(0..<24, id: \.self) { h in
+                    Text(h % 3 == 0 ? String(format: "%02d", h) : "")
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: cell)
+                }
+            }
+            ForEach(days, id: \.self) { d in
+                let h0 = Int(d.timeIntervalSince1970 / 3600)
+                HStack(spacing: 3) {
+                    Text("\(weekdayShort(d)) \(dayMonth(d))")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 76, alignment: .leading)
+                    ForEach(0..<24, id: \.self) { h in
+                        let v = value(model.buckets[h0 + h])
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(pal.color(heatLevel(v, t)))
+                            .frame(width: cell, height: cell)
+                            .help("\(weekdayShort(d)) \(dayMonth(d)) · \(String(format: "%02d:00–%02d:00", h, (h + 1) % 24))\n\(formatTokens(v)) token")
+                    }
+                    Text(formatTokens(dayTotal(d)))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 48, alignment: .trailing)
+                }
+            }
+            HStack {
+                legend(pal)
+                Spacer()
+                Text(L.t("14 ngày: \(formatTokens(total)) · Giờ cao điểm: \(String(format: "%02d:00", peakHour))",
+                         "14 days: \(formatTokens(total)) · Peak hour: \(String(format: "%02d:00", peakHour))")
+                     + (busiest.map { L.t(" · Nhiều nhất: \(weekdayShort($0)) \(dayMonth($0))", " · Busiest: \(weekdayShort($0)) \(dayMonth($0))") } ?? ""))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: By day — GitHub contribution calendar
+
+    private var dayGrid: some View {
+        // Start on the Monday `calendarWeeks - 1` weeks before this week's Monday.
+        let thisMonday = gmt7.dateInterval(of: .weekOfYear, for: Date())?.start ?? todayStart
+        let start = gmt7.date(byAdding: .weekOfYear, value: -(calendarWeeks - 1), to: thisMonday)!
+        let weeks: [[Date]] = (0..<calendarWeeks).map { w in
+            (0..<7).map { gmt7.date(byAdding: .day, value: w * 7 + $0, to: start)! }
+        }
+        let allDays = weeks.flatMap { $0 }.filter { $0 <= todayStart }
+        let totals = Dictionary(uniqueKeysWithValues: allDays.map { ($0, dayTotal($0)) })
+        let t = heatThresholds(Array(totals.values))
+        let pal = HeatPalette(dark: scheme == .dark)
+        let sum = totals.values.reduce(0, +)
+        let active = totals.values.filter { $0 > 0 }.count
+        let best = totals.max { $0.value < $1.value }
+        let c: CGFloat = 18
+        let rowLabels = L.current == .vi ? ["T2", "", "T4", "", "T6", "", "CN"] : ["Mon", "", "Wed", "", "Fri", "", "Sun"]
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 3) {
+                VStack(spacing: 3) {
+                    Text("").frame(height: 12)
+                    ForEach(0..<7, id: \.self) { i in
+                        Text(rowLabels[i]).font(.system(size: 9)).foregroundStyle(.secondary).frame(height: c)
+                    }
+                }
+                .frame(width: 26)
+                ForEach(weeks.indices, id: \.self) { w in
+                    VStack(spacing: 3) {
+                        let first = weeks[w][0]
+                        let showMonth = w == 0 || gmt7.component(.month, from: first) != gmt7.component(.month, from: weeks[w - 1][0])
+                        Text(showMonth ? monthLabel(first) : "")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .fixedSize()
+                            .frame(width: c, height: 12, alignment: .leading)
+                        ForEach(weeks[w], id: \.self) { d in
+                            if d > todayStart {
+                                Color.clear.frame(width: c, height: c)
+                            } else {
+                                let v = totals[d] ?? 0
+                                RoundedRectangle(cornerRadius: 2.5)
+                                    .fill(pal.color(heatLevel(v, t)))
+                                    .frame(width: c, height: c)
+                                    .help("\(weekdayShort(d)) \(dayMonth(d))\n\(formatTokens(v)) token")
+                            }
+                        }
+                    }
+                }
+            }
+            HStack {
+                legend(pal)
+                Spacer()
+                Text(L.t("6 tháng: \(formatTokens(sum)) · \(active) ngày có dùng",
+                         "6 months: \(formatTokens(sum)) · \(active) active days")
+                     + (best.map { L.t(" · Cao nhất: \(dayMonth($0.key)) (\(formatTokens($0.value)))",
+                                       " · Top day: \(dayMonth($0.key)) (\(formatTokens($0.value)))") } ?? ""))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func monthLabel(_ d: Date) -> String {
+        let m = gmt7.component(.month, from: d)
+        return L.current == .vi ? "Th\(m)" : ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m - 1]
+    }
+
+    private func legend(_ pal: HeatPalette) -> some View {
+        HStack(spacing: 3) {
+            Text(L.t("Ít", "Less")).font(.system(size: 10)).foregroundStyle(.secondary)
+            ForEach(0..<5, id: \.self) { RoundedRectangle(cornerRadius: 2.5).fill(pal.color($0)).frame(width: 11, height: 11) }
+            Text(L.t("Nhiều", "More")).font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+@MainActor
+enum ChartWindow {
+    private static var window: NSWindow?
+
+    static func show() {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 560),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                             backing: .buffered, defer: false)
+            w.title = L.t("AiUsage — Token Claude Code", "AiUsage — Claude Code tokens")
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: TokenChartView())
+            w.setContentSize(w.contentView?.fittingSize ?? NSSize(width: 780, height: 560))
+            w.center()
+            window = w
+        }
+        ChartModel.shared.load()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
     }
 }
 
