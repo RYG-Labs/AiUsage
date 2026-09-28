@@ -24,6 +24,7 @@ A native macOS side widget for Claude Code and Cursor usage limits, running task
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Multiple accounts](#multiple-accounts)
 - [How it works](#how-it-works)
 - [Privacy & security](#privacy--security)
 - [Troubleshooting](#troubleshooting)
@@ -39,6 +40,7 @@ A native macOS side widget for Claude Code and Cursor usage limits, running task
 | ⚪ | **Cursor usage** | % of the included plan usage in the current billing cycle. *Experimental.* |
 | 🟢 | **Running tasks** | Number of Claude Code sessions on this Mac that are working right now. |
 | 🔥 | **Tokens today** | Total Claude Code tokens used today, with a breakdown of input, output and cache. The flame flickers faster while a task is running. |
+| 👥 | **Multiple Claude accounts** | Each extra Claude Code profile (`CLAUDE_CONFIG_DIR`) gets a compact ring: the outer ring is the 5-hour limit, the inner ring is the weekly limit, and the account initial sits in the middle. Expired tokens are refreshed automatically. |
 | 🔔 | **Smart notifications** | Alerts at 80% / 95%, when a limit resets, an early warning when your pace will run out before the reset, and when a Claude Code task finishes (with its name and duration). |
 | 📈 | **Pace forecast** | Estimates your burn rate and when you would hit 100% at the current pace, for example *"~20%/h → hits 100% at 16:40, 1h before reset"*. |
 | 🪟 | **Unobtrusive** | 40 px wide tab docked to the screen edge. Drag it up or down, pick a display, or keep it on the desktop only. |
@@ -109,10 +111,31 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 **Rate limits.** If the Claude API returns HTTP 429, AiUsage keeps showing the last known values and backs off, starting at 2 minutes and going up to 15 minutes.
 
+## Multiple accounts
+
+Claude Code stores one login per config directory. To keep several accounts signed in at the same time, give each extra account its own directory:
+
+```bash
+mkdir -p ~/.claude-2 ~/.claude-3
+CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude   # then /login with account 2
+CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude   # then /login with account 3
+```
+
+Optional shortcuts in `~/.zshrc`:
+
+```bash
+alias claude2='CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude'
+alias claude3='CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude'
+```
+
+AiUsage finds every login in the Keychain on its own. `~/.claude` is the main account and shows the full rings. Each other profile gets one account ring. Keep profile folders named `~/.claude-*` so AiUsage can show the account's email.
+
+When a profile's token has expired, AiUsage refreshes it the same way Claude Code does and writes the new token back to that profile's Keychain item, so Claude Code keeps working. If a Claude Code session for that profile is running, AiUsage leaves the refresh to it.
+
 ## Privacy & security
 
-- **Read-only.** AiUsage never modifies the Keychain or any Claude Code or Cursor data.
-- **No telemetry.** The only network requests go to the two usage endpoints listed above and to the GitHub Releases API, which is used to check for updates.
+- **Read-only, with one exception.** AiUsage never modifies Claude Code or Cursor data. The only write is saving a refreshed OAuth token back to the same Keychain item it came from, which is exactly what Claude Code itself does.
+- **No telemetry.** The only network requests go to the two usage endpoints listed above, the Claude OAuth token endpoint (for refreshing tokens), and the GitHub Releases API (for update checks).
 - **Tokens stay in memory.** Credentials are read when needed and never written to disk or logs.
 - **Auditable.** The whole app is one Swift file ([`AiUsage.swift`](AiUsage.swift)).
 

@@ -24,6 +24,7 @@ Widget macOS native theo dõi limit Claude Code và Cursor, số task đang ch�
 - [Yêu cầu](#yêu-cầu)
 - [Cài đặt](#cài-đặt)
 - [Cách dùng](#cách-dùng)
+- [Nhiều tài khoản](#nhiều-tài-khoản)
 - [Cách hoạt động](#cách-hoạt-động)
 - [Quyền riêng tư & bảo mật](#quyền-riêng-tư--bảo-mật)
 - [Xử lý sự cố](#xử-lý-sự-cố)
@@ -39,6 +40,7 @@ Widget macOS native theo dõi limit Claude Code và Cursor, số task đang ch�
 | ⚪ | **Usage Cursor** | % usage của gói trong chu kỳ thanh toán hiện tại. *Đang thử nghiệm.* |
 | 🟢 | **Task đang chạy** | Số phiên Claude Code trên máy này đang làm việc. |
 | 🔥 | **Token hôm nay** | Tổng token Claude Code đã dùng trong ngày, có chi tiết input, output và cache. Ngọn lửa cháy nhanh hơn khi có task đang chạy. |
+| 👥 | **Nhiều tài khoản Claude** | Mỗi profile Claude Code phụ (`CLAUDE_CONFIG_DIR`) có một vòng gọn: vòng ngoài là limit 5 giờ, vòng trong là limit tuần, chữ cái đầu của tài khoản ở giữa. Token hết hạn được tự làm mới. |
 | 🔔 | **Thông báo thông minh** | Báo khi limit chạm 80% / 95%, khi limit vừa reset, cảnh báo sớm khi với tốc độ hiện tại sẽ hết trước giờ reset, và báo khi một task Claude Code chạy xong (kèm tên phiên và thời gian chạy). |
 | 📈 | **Dự báo tốc độ** | Ước tính tốc độ tiêu thụ và thời điểm chạm 100%, ví dụ *"~20%/giờ → chạm 100% lúc 16:40, trước reset 1g"*. |
 | 🪟 | **Gọn, không vướng** | Tab rộng 40 px bám mép màn hình. Kéo lên xuống để đổi vị trí, chọn màn hình, hoặc chỉ hiện trên desktop. |
@@ -109,10 +111,31 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 **Giới hạn tần suất.** Nếu API Claude trả lỗi HTTP 429, AiUsage vẫn hiện số liệu gần nhất và chờ lâu dần trước khi thử lại, bắt đầu từ 2 phút và tối đa 15 phút.
 
+## Nhiều tài khoản
+
+Claude Code lưu mỗi thư mục cấu hình một lần đăng nhập. Muốn nhiều tài khoản cùng đăng nhập một lúc, cho mỗi tài khoản phụ một thư mục riêng:
+
+```bash
+mkdir -p ~/.claude-2 ~/.claude-3
+CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude   # rồi /login bằng tài khoản 2
+CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude   # rồi /login bằng tài khoản 3
+```
+
+Có thể thêm lệnh tắt vào `~/.zshrc` (không bắt buộc):
+
+```bash
+alias claude2='CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude'
+alias claude3='CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude'
+```
+
+AiUsage tự tìm mọi lần đăng nhập trong Keychain. `~/.claude` là tài khoản chính và hiện đầy đủ các vòng. Mỗi profile còn lại có một vòng tài khoản. Nên đặt tên thư mục profile dạng `~/.claude-*` để AiUsage hiện được email của tài khoản.
+
+Khi token của một profile hết hạn, AiUsage làm mới giống cách Claude Code làm, rồi ghi token mới lại vào mục Keychain của profile đó, nên Claude Code vẫn dùng bình thường. Nếu đang có phiên Claude Code chạy bằng profile đó, AiUsage để Claude Code tự làm mới.
+
 ## Quyền riêng tư & bảo mật
 
-- **Chỉ đọc.** AiUsage không sửa gì trong Keychain hay dữ liệu của Claude Code và Cursor.
-- **Không thu thập dữ liệu.** App chỉ gửi request tới hai endpoint usage ở trên và API GitHub Releases để kiểm tra bản mới.
+- **Chỉ đọc, trừ một ngoại lệ.** AiUsage không sửa dữ liệu của Claude Code hay Cursor. Việc ghi duy nhất là lưu token OAuth vừa làm mới trở lại đúng mục Keychain đã đọc, giống hệt việc Claude Code tự làm.
+- **Không thu thập dữ liệu.** App chỉ gửi request tới hai endpoint usage ở trên, endpoint làm mới token OAuth của Claude, và API GitHub Releases để kiểm tra bản mới.
 - **Token chỉ nằm trong bộ nhớ.** Thông tin đăng nhập được đọc khi cần, không bao giờ ghi ra ổ đĩa hay log.
 - **Dễ kiểm tra.** Toàn bộ app nằm trong một file Swift ([`AiUsage.swift`](AiUsage.swift)).
 

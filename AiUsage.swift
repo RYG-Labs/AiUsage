@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Combine
 import Security
+import CryptoKit
 @preconcurrency import UserNotifications
 import ServiceManagement
 
@@ -26,9 +27,33 @@ struct ClaudeSession: Equatable {
     var isBusy: Bool { status == "busy" }
 }
 
+/// One Claude login. Claude Code keeps one Keychain item per config dir:
+/// "Claude Code-credentials" for ~/.claude, and "Claude Code-credentials-<sha256(dir)[0:8]>"
+/// for each CLAUDE_CONFIG_DIR profile.
+struct ClaudeAccount: Equatable, Sendable {
+    static let defaultService = "Claude Code-credentials"
+    let service: String
+    let configDir: String?
+    let email: String?
+    var isDefault: Bool { service == Self.defaultService }
+    var label: String {
+        email ?? configDir.map { ($0 as NSString).lastPathComponent } ?? service
+    }
+    var initial: String { String(label.prefix(1)).uppercased() }
+}
+
+struct AccountUsage: Identifiable, Equatable {
+    let account: ClaudeAccount
+    var limits: [Limit] = []
+    var forecasts: [LimitKind: Forecast] = [:]
+    var error: String?
+    var id: String { account.service }
+    func limit(_ k: LimitKind) -> Limit? { limits.first { $0.kind == k } }
+}
+
 enum LimitKind: String, Codable { case fiveHour, week, opus, sonnet, cursor }
 
-struct Limit: Identifiable, Codable {
+struct Limit: Identifiable, Codable, Equatable {
     let kind: LimitKind
     let title: String
     let used: Double          // 0...100
@@ -49,6 +74,14 @@ final class UsageStore: ObservableObject {
     @Published var tokens = TokenTotals()
     @Published var forecasts: [LimitKind: Forecast] = [:]
     @Published var update: AppUpdate?
+    /// Signed-in account for ~/.claude (what the desktop app and plain `claude` use).
+    @Published var defaultAccount: ClaudeAccount?
+    /// Other CLAUDE_CONFIG_DIR profiles, each with its own limits.
+    @Published var accounts: [AccountUsage] = []
+    private var accountNextAttempt: [String: Date] = [:]
+    private var accountBackoff: [String: TimeInterval] = [:]
+    /// Config dirs to scan for sessions and transcripts (read from background threads).
+    nonisolated(unsafe) static var configDirs: [String] = [NSHomeDirectory() + "/.claude"]
 
     let watcher = LimitWatcher()
     private var busySince: [Int: Date] = [:]
@@ -176,9 +209,10 @@ final class UsageStore: ObservableObject {
     /// Claude Code writes one ~/.claude/sessions/<pid>.json per live session with a
     /// "status" of busy/idle; only count those whose process is still alive.
     func refreshSessions() {
-        let dir = NSHomeDirectory() + "/.claude/sessions"
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         var out: [ClaudeSession] = []
+        for base in Self.configDirs {
+        let dir = base + "/sessions"
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         for f in files where f.hasSuffix(".json") {
             guard let data = FileManager.default.contents(atPath: dir + "/" + f),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -187,6 +221,7 @@ final class UsageStore: ObservableObject {
             let cwd = obj["cwd"] as? String ?? ""
             let name = (obj["name"] as? String) ?? (cwd as NSString).lastPathComponent
             out.append(ClaudeSession(pid: pid, name: name, status: obj["status"] as? String ?? "unknown"))
+        }
         }
         out.sort { $0.pid < $1.pid }
         notifyFinishedTasks(out)
@@ -226,8 +261,14 @@ final class UsageStore: ObservableObject {
         loading = true
         Task {
             defer { loading = false }
+            let found = await Task.detached { Self.discoverAccounts() }.value
+            let home = NSHomeDirectory() + "/.claude"
+            let def = found.first(where: \.isDefault)
+                ?? ClaudeAccount(service: ClaudeAccount.defaultService, configDir: home, email: Self.accountEmail(configDir: home))
+            defaultAccount = def
+            Self.configDirs = Array(Set([home] + found.compactMap(\.configDir))).sorted()
             let tryClaude = Date() >= claudeNextAttempt
-            async let claude = tryClaude ? Result(catching: { try await Self.fetchClaude() }) : nil
+            async let claude = tryClaude ? Result(catching: { try await Self.fetchClaude(def) }) : nil
             async let cursor = Result(catching: { try await Self.fetchCursor() })
 
             switch await claude {
@@ -254,9 +295,38 @@ final class UsageStore: ObservableObject {
                 for x in l { forecasts[x.kind] = watcher.ingest(x) }
             case .failure(let e): cursorError = (e as? WidgetError)?.text ?? e.localizedDescription
             }
+            await refreshExtraAccounts(found.filter { !$0.isDefault })
             recompose()
             lastUpdate = Date()
         }
+    }
+
+    /// Fetches every non-default profile one after another, keeping the last good numbers
+    /// on failure and backing off per account when rate-limited.
+    private func refreshExtraAccounts(_ list: [ClaudeAccount]) async {
+        var out: [AccountUsage] = []
+        for acct in list {
+            var u = accounts.first { $0.id == acct.service } ?? AccountUsage(account: acct)
+            u = AccountUsage(account: acct, limits: u.limits, forecasts: u.forecasts, error: u.error)
+            if Date() >= accountNextAttempt[acct.service] ?? .distantPast {
+                do {
+                    let l = try await Self.fetchClaude(acct)
+                    u.limits = l
+                    u.error = nil
+                    accountBackoff[acct.service] = 0
+                    for x in l { u.forecasts[x.kind] = watcher.ingest(x, account: acct) }
+                } catch {
+                    if case .rateLimited = error as? WidgetError {
+                        let b = min(900, max(120, (accountBackoff[acct.service] ?? 0) * 2))
+                        accountBackoff[acct.service] = b
+                        accountNextAttempt[acct.service] = Date().addingTimeInterval(b)
+                    }
+                    u.error = (error as? WidgetError)?.text ?? error.localizedDescription
+                }
+            }
+            out.append(u)
+        }
+        if out != accounts { accounts = out }
     }
 
     enum WidgetError: Error {
@@ -284,8 +354,8 @@ final class UsageStore: ObservableObject {
 
     // MARK: Claude
 
-    nonisolated static func fetchClaude() async throws -> [Limit] {
-        let token = try readClaudeToken()
+    nonisolated static func fetchClaude(_ account: ClaudeAccount) async throws -> [Limit] {
+        let token = try await claudeToken(for: account)
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -294,8 +364,8 @@ final class UsageStore: ObservableObject {
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 {
-            throw WidgetError.msg(L.t("Token hết hạn — mở Claude Code một lần để làm mới",
-                                       "Token expired — open Claude Code once to refresh it"))
+            throw WidgetError.msg(L.t("Token hết hạn — mở Claude Code bằng tài khoản này một lần để làm mới",
+                                       "Token expired — open Claude Code with this account once to refresh it"))
         }
         if code == 429 { throw WidgetError.rateLimited }
         guard code == 200 else { throw WidgetError.msg("Claude: HTTP \(code)") }
@@ -312,19 +382,18 @@ final class UsageStore: ObservableObject {
         return out
     }
 
-    /// Reads the OAuth token Claude Code stores in the login Keychain.
+    /// Reads the Claude Code credentials JSON for one Keychain service.
     ///
-    /// Switching Claude accounts can leave more than one item under this service name
+    /// Switching Claude accounts can leave more than one item under the same service name
     /// (the CLI adds a fresh entry per account instead of always overwriting in place),
     /// and `security find-generic-password` only ever returns a single arbitrary match.
-    /// Querying via the Security framework directly lets us fetch every match and pick
-    /// the one most recently written, so a newly logged-in account is picked up right away.
-    nonisolated static func readClaudeToken() throws -> String {
-        // Step 1: list every matching item's attributes only (no secret material,
-        // so this never needs a Keychain access prompt) to find the newest one.
+    /// Querying via the Security framework lets us list every match and pick the one most
+    /// recently written, so a newly logged-in account is picked up right away.
+    nonisolated static func loadCreds(service: String) throws -> (ref: CFTypeRef, root: [String: Any]) {
+        // Step 1: list attributes only (no secret material, so no Keychain prompt).
         let listQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
+            kSecAttrService as String: service,
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecReturnAttributes as String: true,
             kSecReturnPersistentRef as String: true,
@@ -332,32 +401,142 @@ final class UsageStore: ObservableObject {
         let keychainError = L.t("Không đọc được token Claude Code trong Keychain",
                                  "Couldn't read the Claude Code token from the Keychain")
         var listResult: CFTypeRef?
-        let listStatus = SecItemCopyMatching(listQuery as CFDictionary, &listResult)
-        guard listStatus == errSecSuccess, let items = listResult as? [[String: Any]], !items.isEmpty
+        guard SecItemCopyMatching(listQuery as CFDictionary, &listResult) == errSecSuccess,
+              let items = listResult as? [[String: Any]], !items.isEmpty
         else { throw WidgetError.msg(keychainError) }
-
         let newest = items.max { a, b in
             let da = a[kSecAttrModificationDate as String] as? Date ?? .distantPast
             let db = b[kSecAttrModificationDate as String] as? Date ?? .distantPast
             return da < db
         }
-        guard let ref = newest?[kSecValuePersistentRef as String]
-        else { throw WidgetError.msg(keychainError) }
+        guard let ref = newest?[kSecValuePersistentRef as String] else { throw WidgetError.msg(keychainError) }
 
-        // Step 2: fetch the secret for that one item only — a single-item fetch can
-        // still trigger the normal (one-time) Keychain access prompt, unlike a batch fetch.
-        let itemQuery: [String: Any] = [
-            kSecValuePersistentRef as String: ref,
-            kSecReturnData as String: true,
-        ]
+        // Step 2: fetch the secret for that one item (may show the one-time access prompt).
+        let itemQuery: [String: Any] = [kSecValuePersistentRef as String: ref, kSecReturnData as String: true]
         var itemResult: CFTypeRef?
-        let itemStatus = SecItemCopyMatching(itemQuery as CFDictionary, &itemResult)
-        guard itemStatus == errSecSuccess, let data = itemResult as? Data,
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = obj["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String
+        guard SecItemCopyMatching(itemQuery as CFDictionary, &itemResult) == errSecSuccess,
+              let data = itemResult as? Data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw WidgetError.msg(keychainError) }
-        return token
+        return (ref as CFTypeRef, root)
+    }
+
+    /// Returns a usable access token, refreshing it first when it has expired.
+    ///
+    /// A refresh rotates the refresh token, so the new pair is written back to the same
+    /// Keychain item — exactly what Claude Code does — and Claude Code keeps working.
+    /// If a Claude Code session for that profile is running, it refreshes the token itself,
+    /// so we leave it alone to avoid racing it.
+    nonisolated static func claudeToken(for account: ClaudeAccount) async throws -> String {
+        let (ref, root) = try loadCreds(service: account.service)
+        guard var oauth = root["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String
+        else { throw WidgetError.msg(L.t("Không đọc được token Claude Code trong Keychain",
+                                          "Couldn't read the Claude Code token from the Keychain")) }
+        let expiresMs = num(oauth["expiresAt"]) ?? 0
+        let expired = expiresMs > 0 && Date(timeIntervalSince1970: expiresMs / 1000) < Date().addingTimeInterval(60)
+        guard expired, let refresh = oauth["refreshToken"] as? String else { return token }
+        if let dir = account.configDir, hasLiveSession(configDir: dir) { return token }
+
+        let fresh = try await refreshOAuth(refresh, scopes: oauth["scopes"] as? [String])
+        oauth["accessToken"] = fresh.access
+        if let r = fresh.refresh { oauth["refreshToken"] = r }
+        oauth["expiresAt"] = Int64((Date().timeIntervalSince1970 + fresh.expiresIn) * 1000)
+        var newRoot = root
+        newRoot["claudeAiOauth"] = oauth
+        let data = try JSONSerialization.data(withJSONObject: newRoot)
+        let status = SecItemUpdate([kSecValuePersistentRef as String: ref] as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        guard status == errSecSuccess else {
+            throw WidgetError.msg(L.t("Không ghi được token mới vào Keychain (\(status))",
+                                       "Couldn't save the refreshed token to the Keychain (\(status))"))
+        }
+        return fresh.access
+    }
+
+    nonisolated static func refreshOAuth(_ refreshToken: String, scopes: [String]?) async throws
+        -> (access: String, refresh: String?, expiresIn: Double) {
+        var body: [String: Any] = [
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",   // Claude Code's OAuth client
+        ]
+        if let scopes, !scopes.isEmpty { body["scope"] = scopes.joined(separator: " ") }
+        var req = URLRequest(url: URL(string: "https://platform.claude.com/v1/oauth/token")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 30
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200,
+              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let access = obj["access_token"] as? String
+        else {
+            throw WidgetError.msg(L.t("Làm mới token thất bại (HTTP \(code)) — mở Claude Code bằng tài khoản này để đăng nhập lại",
+                                       "Token refresh failed (HTTP \(code)) — open Claude Code with this account to sign in again"))
+        }
+        return (access, obj["refresh_token"] as? String, num(obj["expires_in"]) ?? 3600)
+    }
+
+    nonisolated static func hasLiveSession(configDir: String) -> Bool {
+        let dir = configDir + "/sessions"
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where f.hasSuffix(".json") {
+            if let data = FileManager.default.contents(atPath: dir + "/" + f),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let pid = obj["pid"] as? Int, kill(pid_t(pid), 0) == 0 { return true }
+        }
+        return false
+    }
+
+    // MARK: Accounts
+
+    /// Every Claude Code login in the Keychain, default (~/.claude) first.
+    nonisolated static func discoverAccounts() -> [ClaudeAccount] {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var r: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &r) == errSecSuccess, let items = r as? [[String: Any]] else { return [] }
+        let prefix = ClaudeAccount.defaultService
+        let services = Set(items.compactMap { $0[kSecAttrService as String] as? String }.filter {
+            $0 == prefix || ($0.hasPrefix(prefix + "-") && $0.count == prefix.count + 9)   // "-" + 8 hex chars
+        })
+
+        // Map the 8-char suffix back to a config dir by hashing the candidate paths.
+        let home = NSHomeDirectory()
+        var candidates = [home + "/.claude"]
+        for n in (try? FileManager.default.contentsOfDirectory(atPath: home)) ?? [] where n.hasPrefix(".claude") {
+            var isDir: ObjCBool = false
+            let path = home + "/" + n
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue { candidates.append(path) }
+        }
+        var byHash: [String: String] = [:]
+        for c in candidates {
+            for v in [c, c + "/"] { byHash[hash8(v.precomposedStringWithCanonicalMapping)] = c }
+        }
+
+        return services.map { svc -> ClaudeAccount in
+            let dir = svc == prefix ? home + "/.claude" : byHash[String(svc.suffix(8))]
+            return ClaudeAccount(service: svc, configDir: dir, email: dir.flatMap { accountEmail(configDir: $0) })
+        }
+        .sorted { a, b in a.isDefault != b.isDefault ? a.isDefault : a.label < b.label }
+    }
+
+    nonisolated static func hash8(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined().prefix(8).description
+    }
+
+    /// Email of the account signed in to a config dir (from its .claude.json).
+    nonisolated static func accountEmail(configDir: String) -> String? {
+        let home = NSHomeDirectory()
+        let file = configDir == home + "/.claude" ? home + "/.claude.json" : configDir + "/.claude.json"
+        guard let data = FileManager.default.contents(atPath: file),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let acct = obj["oauthAccount"] as? [String: Any] else { return nil }
+        return acct["emailAddress"] as? String
     }
 
     // MARK: Cursor
@@ -708,6 +887,57 @@ struct RingGauge: View {
     }
 }
 
+/// Compact ring for another Claude account: outer = 5-hour, inner = weekly, initial in the middle.
+struct AccountRing: View {
+    let usage: AccountUsage
+    let showRemaining: Bool
+
+    private func value(_ l: Limit?) -> Double {
+        guard let l else { return 0 }
+        return showRemaining ? l.remaining : l.used
+    }
+
+    var body: some View {
+        let five = usage.limit(.fiveHour), week = usage.limit(.week)
+        VStack(spacing: 2) {
+            ZStack {
+                Circle().stroke(Color.white.opacity(0.18), lineWidth: 2.6)
+                Circle().trim(from: 0, to: max(0.02, value(five) / 100))
+                    .stroke(claudeOrange, style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Group {
+                    Circle().stroke(Color.white.opacity(0.14), lineWidth: 2.2)
+                    Circle().trim(from: 0, to: max(0.02, value(week) / 100))
+                        .stroke(Color.white.opacity(0.9), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .padding(5)
+                Text(usage.limits.isEmpty && usage.error != nil ? "!" : usage.account.initial)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(usage.limits.isEmpty && usage.error != nil ? Color.orange : Color.white)
+            }
+            .frame(width: Layout.ring, height: Layout.ring)
+            Text(five.map { "\(Int(value($0).rounded()))%" } ?? "–")
+                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.white)
+                .frame(height: 11)
+        }
+        .help(accountTooltip(usage))
+    }
+}
+
+func accountTooltip(_ u: AccountUsage) -> String {
+    var lines = ["👤 " + u.account.label]
+    for l in u.limits {
+        lines.append(L.t("\(displayTitle(l)): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))",
+                         "\(displayTitle(l)): \(Int(l.used.rounded()))% used · resets in \(countdown(to: l.resetsAt)) — at \(resetClock(l.resetsAt))"))
+        if let f = forecastText(u.forecasts[l.kind]) { lines.append("   " + f) }
+    }
+    if let e = u.error { lines.append("⚠︎ " + e) }
+    lines.append(L.t("(Vòng ngoài: 5 giờ · vòng trong: tuần)", "(Outer ring: 5-hour · inner ring: weekly)"))
+    return lines.joined(separator: "\n")
+}
+
 // MARK: - Token burn (today)
 
 struct TokenTotals: Equatable {
@@ -736,8 +966,9 @@ final class TokenCounter: @unchecked Sendable {
         if startOfDay != day {
             day = startOfDay; offsets = [:]; seen = []; totals = TokenTotals()
         }
-        let root = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects")
-        guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return totals }
+        for base in UsageStore.configDirs {
+        let root = URL(fileURLWithPath: base + "/projects")
+        guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { continue }
         for case let url as URL in en where url.pathExtension == "jsonl" {
             guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
                   let mod = v.contentModificationDate, mod >= startOfDay,
@@ -753,6 +984,7 @@ final class TokenCounter: @unchecked Sendable {
             // Only consume complete lines; a partial trailing line is re-read next time.
             offsets[path] = offset + UInt64(lastNL + 1)
             for line in data[..<lastNL].split(separator: 0x0A) { ingest(line, since: startOfDay) }
+        }
         }
         return totals
     }
@@ -973,7 +1205,7 @@ struct SideWidgetView: View {
     @State private var dragStart: (mouseY: CGFloat, top: CGFloat)?
 
     var body: some View {
-        let count = max(1, store.limits.count)
+        let count = max(1, store.limits.count + store.accounts.count)
         let shape = SideTabShape(shoulder: Layout.shoulder, corner: Layout.corner)
         ZStack {
             shape.fill(Color.black)
@@ -985,6 +1217,7 @@ struct SideWidgetView: View {
                 } else {
                     ForEach(store.limits) { RingGauge(limit: $0, showRemaining: showRemaining, forecast: store.forecasts[$0.kind]) }
                 }
+                ForEach(store.accounts) { AccountRing(usage: $0, showRemaining: showRemaining) }
             }
             .padding(.leading, 2)
         }
@@ -1063,6 +1296,11 @@ enum SettingsMenu {
             info.isEnabled = false
             menu.addItem(info)
         }
+        if !store.accounts.isEmpty, let def = store.defaultAccount {
+            let h = NSMenuItem(title: "👤 " + def.label + L.t(" (tài khoản chính)", " (main account)"), action: nil, keyEquivalent: "")
+            h.isEnabled = false
+            menu.addItem(h)
+        }
         for l in store.limits {
             let title = L.t(
                 "\(displayTitle(l)): dùng \(Int(l.used.rounded()))% · reset sau \(countdown(to: l.resetsAt)) — lúc \(resetClock(l.resetsAt))",
@@ -1077,6 +1315,15 @@ enum SettingsMenu {
                 menu.addItem(fi)
             }
         }
+        for u in store.accounts {
+            menu.addItem(.separator())
+            for line in accountTooltip(u).split(separator: "\n").dropLast() {
+                let it = NSMenuItem(title: String(line), action: nil, keyEquivalent: "")
+                it.isEnabled = false
+                menu.addItem(it)
+            }
+        }
+        if !store.accounts.isEmpty { menu.addItem(.separator()) }
         let tk = store.tokens
         let tokTitle = L.t(
             "Token hôm nay: \(formatTokens(tk.total)) (output \(formatTokens(tk.output)), cache đọc \(formatTokens(tk.cacheRead)))",
@@ -1248,7 +1495,7 @@ final class SidePanel {
         layout()
         p.orderFrontRegardless()
 
-        store.$limits.map(\.count).removeDuplicates()
+        store.$limits.map(\.count).combineLatest(store.$accounts.map(\.count)).map { $0 + $1 }.removeDuplicates()
             .sink { [weak self] _ in DispatchQueue.main.async { self?.layout() } }
             .store(in: &bag)
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
@@ -1266,7 +1513,7 @@ final class SidePanel {
     /// Size the window for the current number of rings and glue it to the right edge.
     func layout() {
         guard let panel else { return }
-        let size = Layout.windowSize(count: max(1, store?.limits.count ?? 1))
+        let size = Layout.windowSize(count: max(1, (store?.limits.count ?? 1) + (store?.accounts.count ?? 0)))
         let s = screenFrame
         let saved = UserDefaults.standard.object(forKey: Pref.panelTop) as? Double
         let top = saved.map { CGFloat($0) } ?? (s.midY + size.height / 2 - 60)
@@ -1322,6 +1569,12 @@ struct MenuPanel: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
+            ForEach(store.accounts) { u in
+                Divider()
+                Text(accountTooltip(u).split(separator: "\n").dropLast().joined(separator: "\n"))
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let u = store.update {
                 Button(L.t("⬆︎ Có bản mới v\(u.version) — Tải về", "⬆︎ v\(u.version) available — Download")) {
@@ -1490,12 +1743,12 @@ final class LimitWatcher {
         l.resetsAt.map { String(Int(($0.timeIntervalSince1970 / 600).rounded())) } ?? "none"
     }
 
-    func ingest(_ l: Limit) -> Forecast? {
+    func ingest(_ l: Limit, account: ClaudeAccount? = nil) -> Forecast? {
         let d = UserDefaults.standard
-        let key = l.kind.rawValue
+        let key = (account.map { $0.service + "|" } ?? "") + l.kind.rawValue
         let win = windowID(l)
         let now = Date()
-        let title = displayTitle(l)
+        let title = (account.map { $0.label + " · " } ?? "") + displayTitle(l)
         var t = tracks[key] ?? Track(window: win, lastUsed: l.used)
 
         if t.window != win {
