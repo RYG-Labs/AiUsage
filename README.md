@@ -84,6 +84,7 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 | --- | --- |
 | Refresh | Fetch usage now |
 | Show % remaining | Show remaining % instead of used % |
+| Check limits every | How often the usage APIs are called: 1, 2, 5 (default), 10, 15 or 30 minutes |
 | Always on top of other windows | Keep the tab above other windows. Turn it off to show the tab on the desktop only. |
 | Language | Tiếng Việt / English |
 | Show on display | Choose which monitor the tab is on. Only appears with more than one display. |
@@ -100,8 +101,8 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 | Data | Source | Refresh |
 | --- | --- | --- |
-| Claude limits | `api.anthropic.com/api/oauth/usage`, called with the Claude Code OAuth token from the login Keychain. If several Keychain items match, the most recently modified one is used. | 90 s |
-| Cursor usage | Access token from Cursor's local `state.vscdb`, then `cursor.com/api/usage-summary`. Legacy request-based plans fall back to `/api/usage`. | 90 s |
+| Claude limits | `api.anthropic.com/api/oauth/usage`, called with the Claude Code OAuth token from the login Keychain. If several Keychain items match, the most recently modified one is used. | every 5 min (configurable: 1–30 min) |
+| Cursor usage | Access token from Cursor's local `state.vscdb`, then `cursor.com/api/usage-summary`. Legacy request-based plans fall back to `/api/usage`. | every 5 min (configurable: 1–30 min) |
 | Running tasks | `~/.claude/sessions/*.json`. A session counts when its `status` is `"busy"` and its process is still alive. | 2 s |
 | Tokens today | `usage` fields in `~/.claude/projects/**/*.jsonl`. Files are read incrementally, each response is counted once, and the total resets at local midnight. | 30 s |
 

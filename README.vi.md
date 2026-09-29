@@ -84,6 +84,7 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 | --- | --- |
 | Làm mới | Cập nhật số liệu ngay |
 | Hiển thị % còn lại | Hiện % còn lại thay vì % đã dùng |
+| Cập nhật limit mỗi | Tần suất gọi API usage: 1, 2, 5 (mặc định), 10, 15 hoặc 30 phút |
 | Luôn nằm trên cửa sổ khác | Tab nằm trên các cửa sổ khác. Tắt đi thì tab chỉ hiện trên desktop. |
 | Ngôn ngữ / Language | Tiếng Việt / English |
 | Hiển thị trên màn hình | Chọn màn hình đặt tab. Chỉ hiện khi máy nối từ 2 màn hình trở lên. |
@@ -100,8 +101,8 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 | Dữ liệu | Nguồn | Tần suất cập nhật |
 | --- | --- | --- |
-| Limit Claude | Gọi `api.anthropic.com/api/oauth/usage` bằng token OAuth của Claude Code trong Keychain. Nếu Keychain có nhiều mục trùng tên, app dùng mục được sửa gần nhất. | 90 giây |
-| Usage Cursor | Lấy access token trong file `state.vscdb` của Cursor, rồi gọi `cursor.com/api/usage-summary`. Gói cũ tính theo request thì dùng `/api/usage`. | 90 giây |
+| Limit Claude | Gọi `api.anthropic.com/api/oauth/usage` bằng token OAuth của Claude Code trong Keychain. Nếu Keychain có nhiều mục trùng tên, app dùng mục được sửa gần nhất. | mỗi 5 phút (chỉnh được 1–30 phút) |
+| Usage Cursor | Lấy access token trong file `state.vscdb` của Cursor, rồi gọi `cursor.com/api/usage-summary`. Gói cũ tính theo request thì dùng `/api/usage`. | mỗi 5 phút (chỉnh được 1–30 phút) |
 | Task đang chạy | Đọc `~/.claude/sessions/*.json`. Một phiên được đếm khi `status` là `"busy"` và process của nó vẫn còn chạy. | 2 giây |
 | Token hôm nay | Cộng các trường `usage` trong `~/.claude/projects/**/*.jsonl`. App chỉ đọc phần mới ghi thêm, mỗi câu trả lời chỉ tính một lần, và tổng về 0 lúc 0h theo giờ máy. | 30 giây |
 

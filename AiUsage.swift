@@ -98,14 +98,17 @@ final class UsageStore: ObservableObject {
     private var claudeBackoff: TimeInterval = 0
     private var cursorLimits: [Limit] = []
     private var timer: Timer?
-    let interval: TimeInterval = 90
+    /// How often the usage APIs are called (Claude, Cursor, extra accounts). Default 5 minutes.
+    static let intervalChoices: [TimeInterval] = [60, 120, 300, 600, 900, 1800]
+    var interval: TimeInterval {
+        let v = UserDefaults.standard.object(forKey: Pref.refreshInterval) as? Double ?? 300
+        return v >= 60 ? v : 300
+    }
 
     init() {
         recompose()
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
+        scheduleRefresh()
         refreshTokens()
         tokenTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshTokens() }
@@ -194,6 +197,15 @@ final class UsageStore: ObservableObject {
             if p != q { return p > q }
         }
         return false
+    }
+
+    /// (Re)starts the API polling timer; called at launch and when the interval setting changes.
+    func scheduleRefresh() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        timer?.tolerance = 10
     }
 
     func refreshTokens() {
@@ -666,6 +678,7 @@ enum Pref {
     static let notifyReset = "notifyReset"
     static let notifyForecast = "notifyForecast"
     static let notifyTasks = "notifyTasks"
+    static let refreshInterval = "refreshInterval"
 }
 
 // MARK: - Localization
@@ -1427,6 +1440,18 @@ enum SettingsMenu {
                 }
             }
             m.addItem(.separator())
+            submenu(m, L.t("Cập nhật limit mỗi", "Check limits every")) { im in
+                for sec in UsageStore.intervalChoices {
+                    let mins = Int(sec / 60)
+                    action(im, L.t("\(mins) phút", mins == 1 ? "1 minute" : "\(mins) minutes"),
+                           checked: store.interval == sec) {
+                        d.set(sec, forKey: Pref.refreshInterval)
+                        store.scheduleRefresh()
+                    }
+                }
+                im.addItem(.separator())
+                info(im, L.t("Gọi càng thưa càng ít bị giới hạn (429)", "Less often = fewer rate limits (429)"))
+            }
             submenu(m, L.t("Thông báo", "Notifications")) { nm in
                 toggle2(nm, L.t("Limit chạm 80% / 95%", "Limit reaches 80% / 95%"), Pref.notifyLimits)
                 toggle2(nm, L.t("Limit vừa reset", "Limit has reset"), Pref.notifyReset)
@@ -2241,6 +2266,7 @@ struct AiUsageApp: App {
             Pref.notifyReset: true,
             Pref.notifyForecast: true,
             Pref.notifyTasks: true,
+            Pref.refreshInterval: 300.0,
         ])
     }
 
