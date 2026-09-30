@@ -265,8 +265,13 @@ final class UsageStore: ObservableObject {
     /// Rebuild the visible list (Claude first, then Cursor if enabled).
     func recompose() {
         let showCursor = UserDefaults.standard.bool(forKey: Pref.showCursor)
-        limits = claudeLimits + (showCursor ? cursorLimits : [])
+        // While the main account can't be read (429, expired login…) show a single red
+        // ring instead of stale numbers, so it's obvious something needs attention.
+        limits = (error == nil ? claudeLimits : []) + (showCursor ? cursorLimits : [])
     }
+
+    /// Rings on the tab: limits + the red error ring + one per extra account.
+    var ringCount: Int { max(1, limits.count + (error != nil ? 1 : 0) + accounts.count) }
 
     func refresh() {
         guard !loading else { return }
@@ -294,8 +299,8 @@ final class UsageStore: ObservableObject {
                     claudeBackoff = min(900, max(120, claudeBackoff * 2))
                     claudeNextAttempt = Date().addingTimeInterval(claudeBackoff)
                     let mins = Int(claudeBackoff / 60)
-                    error = L.t("Claude API tạm giới hạn tần suất — hiển thị số cũ, thử lại sau \(mins) phút",
-                                 "Claude API is rate-limited — showing last known numbers, retrying in \(mins) min")
+                    error = L.t("Claude API từ chối vì gọi quá nhiều (429) — tự thử lại sau \(mins) phút",
+                                 "Claude API is rate-limiting (429) — retrying in \(mins) min")
                 } else {
                     error = (e as? WidgetError)?.text ?? e.localizedDescription
                 }
@@ -900,6 +905,28 @@ struct RingGauge: View {
     }
 }
 
+let errorRed = Color(red: 1.0, green: 0.27, blue: 0.23)
+
+/// Shown instead of the Claude rings when the main account can't be read.
+struct ErrorRing: View {
+    let message: String
+    var body: some View {
+        VStack(spacing: 2) {
+            ZStack {
+                Circle().stroke(errorRed, lineWidth: Layout.ringLine)
+                Text("!").font(.system(size: 13, weight: .heavy)).foregroundStyle(errorRed)
+            }
+            .frame(width: Layout.ring, height: Layout.ring)
+            Text(L.t("Lỗi", "Error"))
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(errorRed)
+                .frame(height: 11)
+        }
+        .help(L.t("Claude: \(message)\n\nNếu lỗi kéo dài, đăng nhập lại: mở Terminal, chạy `claude` rồi gõ /login.",
+                  "Claude: \(message)\n\nIf it persists, sign in again: open Terminal, run `claude`, then type /login."))
+    }
+}
+
 /// Compact ring for another Claude account: outer = 5-hour, inner = weekly, initial in the middle.
 struct AccountRing: View {
     let usage: AccountUsage
@@ -925,12 +952,22 @@ struct AccountRing: View {
                         .rotationEffect(.degrees(-90))
                 }
                 .padding(5)
-                Text(usage.limits.isEmpty && usage.error != nil ? "!" : usage.account.initial)
+                Text(usage.account.initial)
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(usage.limits.isEmpty && usage.error != nil ? Color.orange : Color.white)
+                    .foregroundStyle(.white)
             }
             .frame(width: Layout.ring, height: Layout.ring)
-            Text(five.map { "\(Int(value($0).rounded()))%" } ?? "–")
+            .overlay {
+                if usage.error != nil {
+                    // Same red ring as the main account's error state.
+                    ZStack {
+                        Circle().fill(Color.black)
+                        Circle().stroke(errorRed, lineWidth: 2.6)
+                        Text("!").font(.system(size: 12, weight: .heavy)).foregroundStyle(errorRed)
+                    }
+                }
+            }
+            Text(usage.error != nil ? usage.account.initial : five.map { "\(Int(value($0).rounded()))%" } ?? "–")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
                 .frame(height: 11)
@@ -1218,7 +1255,7 @@ struct SideWidgetView: View {
     @State private var dragStart: (mouseY: CGFloat, top: CGFloat)?
 
     var body: some View {
-        let count = max(1, store.limits.count + store.accounts.count)
+        let count = store.ringCount
         let shape = SideTabShape(shoulder: Layout.shoulder, corner: Layout.corner)
         ZStack {
             shape.fill(Color.black)
@@ -1229,11 +1266,12 @@ struct SideWidgetView: View {
                         .contentShape(Rectangle())
                         .onTapGesture { ChartWindow.show() }
                 }
-                if store.limits.isEmpty {
+                if let e = store.error {
+                    ErrorRing(message: e)
+                } else if store.limits.isEmpty && store.accounts.isEmpty {
                     placeholder
-                } else {
-                    ForEach(store.limits) { RingGauge(limit: $0, showRemaining: showRemaining, forecast: store.forecasts[$0.kind]) }
                 }
+                ForEach(store.limits) { RingGauge(limit: $0, showRemaining: showRemaining, forecast: store.forecasts[$0.kind]) }
                 ForEach(store.accounts) { AccountRing(usage: $0, showRemaining: showRemaining) }
             }
             .padding(.leading, 2)
@@ -1535,7 +1573,7 @@ final class SidePanel {
         layout()
         p.orderFrontRegardless()
 
-        store.$limits.map(\.count).combineLatest(store.$accounts.map(\.count)).map { $0 + $1 }.removeDuplicates()
+        store.$limits.combineLatest(store.$accounts, store.$error).map { _ in UsageStore.shared.ringCount }.removeDuplicates()
             .sink { [weak self] _ in DispatchQueue.main.async { self?.layout() } }
             .store(in: &bag)
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
@@ -1553,7 +1591,7 @@ final class SidePanel {
     /// Size the window for the current number of rings and glue it to the right edge.
     func layout() {
         guard let panel else { return }
-        let size = Layout.windowSize(count: max(1, (store?.limits.count ?? 1) + (store?.accounts.count ?? 0)))
+        let size = Layout.windowSize(count: store?.ringCount ?? 1)
         let s = screenFrame
         let saved = UserDefaults.standard.object(forKey: Pref.panelTop) as? Double
         let top = saved.map { CGFloat($0) } ?? (s.midY + size.height / 2 - 60)
@@ -2285,7 +2323,7 @@ struct AiUsageApp: App {
         MenuBarExtra(isInserted: $showMenuBar) {
             MenuPanel(store: store)
         } label: {
-            let label = store.fiveHour.map { "\(Int($0.used.rounded()))%" } ?? "…"
+            let label = store.error != nil ? "!" : store.fiveHour.map { "\(Int($0.used.rounded()))%" } ?? "…"
             HStack(spacing: 3) {
                 Image(systemName: "sparkle")
                 Text(label).monospacedDigit()
