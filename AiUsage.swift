@@ -755,6 +755,31 @@ struct TokenTotals: Equatable {
     var total: Int { input + output + cacheWrite + cacheRead }
 }
 
+/// Feeds every complete line of `url` after `offset` to `body`, reading 1 MB at a time so a
+/// 40 MB transcript never sits in memory, and draining the autorelease pool after each chunk
+/// (JSONSerialization allocates lots of autoreleased objects that otherwise pile up until the
+/// scanning queue goes idle). Returns the offset just past the last complete line, so a partial
+/// trailing line is re-read next time.
+func forEachLine(in url: URL, from offset: UInt64, _ body: (Data) -> Void) -> UInt64 {
+    guard let fh = try? FileHandle(forReadingFrom: url) else { return offset }
+    defer { try? fh.close() }
+    try? fh.seek(toOffset: offset)
+    var pos = offset
+    var carry = Data()
+    var eof = false
+    while !eof {
+        autoreleasepool {
+            guard let chunk = try? fh.read(upToCount: 1 << 20), !chunk.isEmpty else { eof = true; return }
+            carry.append(chunk)
+            guard let lastNL = carry.lastIndex(of: 0x0A) else { return }
+            for line in carry[..<lastNL].split(separator: 0x0A) { body(line) }
+            pos += UInt64(lastNL - carry.startIndex + 1)
+            carry = Data(carry[(lastNL + 1)...])
+        }
+    }
+    return pos
+}
+
 /// Sums today's token usage from Claude Code transcripts (~/.claude/projects/**/*.jsonl).
 /// Reads files incrementally (remembers byte offsets) and resets at local midnight.
 final class TokenCounter: @unchecked Sendable {
@@ -786,14 +811,8 @@ final class TokenCounter: @unchecked Sendable {
             let path = url.path
             var offset = offsets[path] ?? 0
             if UInt64(size) < offset { offset = 0 }            // file was rewritten
-            guard UInt64(size) > offset, let fh = try? FileHandle(forReadingFrom: url) else { continue }
-            defer { try? fh.close() }
-            try? fh.seek(toOffset: offset)
-            guard let data = try? fh.readToEnd(), !data.isEmpty,
-                  let lastNL = data.lastIndex(of: 0x0A) else { continue }
-            // Only consume complete lines; a partial trailing line is re-read next time.
-            offsets[path] = offset + UInt64(lastNL + 1)
-            for line in data[..<lastNL].split(separator: 0x0A) { ingest(line, since: startOfDay) }
+            guard UInt64(size) > offset else { continue }
+            offsets[path] = forEachLine(in: url, from: offset) { ingest($0, since: startOfDay) }
         }
         }
         return totals
@@ -803,7 +822,7 @@ final class TokenCounter: @unchecked Sendable {
 
     private func ingest(_ line: Data.SubSequence, since start: Date) {
         guard line.range(of: Self.usageMarker) != nil,
-              let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               obj["type"] as? String == "assistant",
               let msg = obj["message"] as? [String: Any],
               let u = msg["usage"] as? [String: Any],
@@ -1709,12 +1728,8 @@ final class TokenHistory: @unchecked Sendable {
                           let size = v.fileSize else { continue }
                     var offset = offsets[url.path] ?? 0
                     if UInt64(size) < offset { offset = 0 }
-                    guard UInt64(size) > offset, let fh = try? FileHandle(forReadingFrom: url) else { continue }
-                    defer { try? fh.close() }
-                    try? fh.seek(toOffset: offset)
-                    guard let data = try? fh.readToEnd(), let lastNL = data.lastIndex(of: 0x0A) else { continue }
-                    offsets[url.path] = offset + UInt64(lastNL + 1)
-                    for line in data[..<lastNL].split(separator: 0x0A) { ingest(line, since: since) }
+                    guard UInt64(size) > offset else { continue }
+                    offsets[url.path] = forEachLine(in: url, from: offset) { ingest($0, since: since) }
                 }
             }
             return buckets
@@ -1723,7 +1738,7 @@ final class TokenHistory: @unchecked Sendable {
 
     private func ingest(_ line: Data.SubSequence, since: Date) {
         guard line.range(of: Self.usageMarker) != nil,
-              let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
               obj["type"] as? String == "assistant",
               let msg = obj["message"] as? [String: Any],
               let u = msg["usage"] as? [String: Any],
