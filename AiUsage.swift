@@ -533,7 +533,14 @@ let claudeOrange = Color(red: 0.851, green: 0.467, blue: 0.341)
 let runningGreen = Color(red: 0.20, green: 0.78, blue: 0.35)
 
 
-func ringColor(_ kind: LimitKind) -> Color { claudeOrange }
+/// Brand orange that blends toward red as a limit fills (60% → 95% used), so the ring
+/// warns gradually instead of flipping colour at a threshold.
+func ringTint(used: Double) -> Color {
+    let t = min(1, max(0, (used - 60) / 35))
+    return Color(red: 0.851 + (1.0 - 0.851) * t,
+                 green: 0.467 + (0.20 - 0.467) * t,
+                 blue: 0.341 + (0.15 - 0.341) * t)
+}
 
 /// Color by how much has been used: green → yellow → red.
 func severityColor(used: Double) -> Color {
@@ -637,6 +644,8 @@ struct RingGauge: View {
     let limit: Limit
     let showRemaining: Bool
     var forecast: Forecast? = nil
+    @State private var glow = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var value: Double { showRemaining ? limit.remaining : limit.used }
 
@@ -646,9 +655,10 @@ struct RingGauge: View {
                 Circle().stroke(Color.white.opacity(0.18), lineWidth: Layout.ringLine)
                 Circle()
                     .trim(from: 0, to: max(0.02, value / 100))
-                    .stroke(ringColor(limit.kind),
+                    .stroke(ringTint(used: limit.used),
                             style: StrokeStyle(lineWidth: Layout.ringLine, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .shadow(color: ringTint(used: limit.used).opacity(0.9 * glow), radius: 1 + 5 * glow)
                     .animation(.easeOut(duration: 0.6), value: value)
                 LimitIcon(kind: limit.kind).foregroundStyle(.white)
             }
@@ -656,7 +666,15 @@ struct RingGauge: View {
             Text("\(Int(value.rounded()))%")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
+                .contentTransition(.numericText(value: value))
+                .animation(.easeOut(duration: 0.5), value: Int(value.rounded()))
                 .frame(height: 11)
+        }
+        .onChange(of: limit.used) { old, new in
+            // One soft flash when usage goes up; nothing runs afterwards.
+            guard new > old, !reduceMotion else { return }
+            glow = 1
+            DispatchQueue.main.async { withAnimation(.easeOut(duration: 0.9)) { glow = 0 } }
         }
         .help(L.t(
             "\(displayTitle(limit))\nĐã dùng \(Int(limit.used.rounded()))% · còn \(Int(limit.remaining.rounded()))%\nReset sau \(countdown(to: limit.resetsAt)) — lúc \(resetClock(limit.resetsAt))\(forecastText(forecast).map { "\n" + $0 } ?? "")\n(Bấm để mở cài đặt, kéo để di chuyển)",
@@ -703,13 +721,15 @@ struct AccountRing: View {
             ZStack {
                 Circle().stroke(Color.white.opacity(0.18), lineWidth: 2.6)
                 Circle().trim(from: 0, to: max(0.02, value(five) / 100))
-                    .stroke(claudeOrange, style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                    .stroke(ringTint(used: five?.used ?? 0), style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .animation(.easeOut(duration: 0.6), value: value(five))
                 Group {
                     Circle().stroke(Color.white.opacity(0.14), lineWidth: 2.2)
                     Circle().trim(from: 0, to: max(0.02, value(week) / 100))
                         .stroke(Color.white.opacity(0.9), style: StrokeStyle(lineWidth: 2.2, lineCap: .round))
                         .rotationEffect(.degrees(-90))
+                        .animation(.easeOut(duration: 0.6), value: value(week))
                 }
                 .padding(5)
                 Text(usage.account.initial)
@@ -730,6 +750,8 @@ struct AccountRing: View {
             Text(usage.error != nil ? usage.account.initial : five.map { "\(Int(value($0).rounded()))%" } ?? "–")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
+                .contentTransition(.numericText(value: value(five)))
+                .animation(.easeOut(duration: 0.5), value: Int(value(five).rounded()))
                 .frame(height: 11)
         }
         .help(accountTooltip(usage))
@@ -887,6 +909,14 @@ func loop(_ keyPath: String, from: Any, to: Any, duration: Double) -> CABasicAni
 /// Red flame that flickers like a candle; livelier while a task is running.
 struct FlickerFlame: NSViewRepresentable {
     var intense: Bool
+    /// Message count; each increase makes the flame flare once.
+    var burst = 0
+
+    final class Coordinator {
+        var lastBurst: Int?
+        var halo: CALayer?
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor static let image: CGImage? = {
         let fire = LinearGradient(
@@ -911,7 +941,19 @@ struct FlickerFlame: NSViewRepresentable {
         l.shadowOpacity = 0.7
         l.shadowRadius = 2.5
         l.shadowOffset = .zero
+        // Soft ember glow behind the flame, normally invisible; `flare` flashes it.
+        let halo = CAGradientLayer()
+        halo.type = .radial
+        halo.colors = [NSColor(red: 1, green: 0.62, blue: 0.2, alpha: 0.95).cgColor,
+                       NSColor(red: 1, green: 0.3, blue: 0.1, alpha: 0).cgColor]
+        halo.startPoint = CGPoint(x: 0.5, y: 0.5)
+        halo.endPoint = CGPoint(x: 1, y: 1)
+        halo.bounds = CGRect(x: 0, y: 0, width: 28, height: 28)
+        halo.opacity = 0
+        v.layer?.insertSublayer(halo, below: l)
+        context.coordinator.halo = halo
         v.onLayout = { layer, b in
+            halo.position = CGPoint(x: b.midX, y: b.midY)
             guard let img = Self.image else { return }
             let s = NSScreen.main?.backingScaleFactor ?? 2
             let w = CGFloat(img.width) / s, h = CGFloat(img.height) / s
@@ -926,7 +968,27 @@ struct FlickerFlame: NSViewRepresentable {
         return v
     }
 
+    private func flare(_ halo: CALayer) {
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 1, 0]
+        fade.keyTimes = [0, 0.2, 1]
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 0.45; grow.toValue = 1.5
+        let g = CAAnimationGroup()
+        g.animations = [fade, grow]
+        g.duration = 0.75
+        g.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        halo.add(g, forKey: "flare")
+    }
+
     func updateNSView(_ v: LayerBox, context: Context) {
+        let c = context.coordinator
+        // Skip the 0 → N jump of the first scan of the day; flare only on later growth.
+        if let last = c.lastBurst, last > 0, burst > last, let halo = c.halo,
+           !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            flare(halo)
+        }
+        c.lastBurst = burst
         // Only burn while Claude is working; a frozen flame costs the WindowServer nothing.
         let speed: Float = intense ? 1.7 : 0
         if v.content.speed != speed {
@@ -967,11 +1029,13 @@ struct TokenBadge: View {
     var active = false
     var body: some View {
         VStack(spacing: 1) {
-            FlickerFlame(intense: active)
+            FlickerFlame(intense: active, burst: tokens.messages)
                 .frame(width: 14, height: 12)
             Text(formatTokens(tokens.total))
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
+                .contentTransition(.numericText(value: Double(tokens.total)))
+                .animation(.easeOut(duration: 0.5), value: tokens.total)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
