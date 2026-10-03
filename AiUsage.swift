@@ -1148,7 +1148,8 @@ struct FlickerFlame: NSViewRepresentable {
     }
 
     func updateNSView(_ v: LayerBox, context: Context) {
-        let speed: Float = intense ? 1.7 : 0.8
+        // Only burn while Claude is working; a frozen flame costs the WindowServer nothing.
+        let speed: Float = intense ? 1.7 : 0
         if v.content.speed != speed {
             // Keep the current phase when changing speed to avoid a jump.
             let l = v.content
