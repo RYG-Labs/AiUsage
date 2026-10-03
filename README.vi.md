@@ -5,7 +5,7 @@
 # AiUsage
 
 **Mức sử dụng AI lập trình, luôn trong tầm mắt.**<br>
-Widget macOS native theo dõi limit Claude Code và Cursor, số task đang chạy và lượng token dùng trong ngày.
+Widget macOS native theo dõi limit Claude Code, số task đang chạy và lượng token dùng trong ngày.
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](#yêu-cầu)
 [![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](AiUsage.swift)
@@ -37,10 +37,9 @@ Widget macOS native theo dõi limit Claude Code và Cursor, số task đang ch�
 | | Tính năng | Chi tiết |
 | :-: | --- | --- |
 | 🟠 | **Limit Claude** | Mức dùng của phiên 5 giờ và giới hạn tuần. Nếu gói của bạn có giới hạn tuần riêng cho Opus/Sonnet thì hiện thêm. Có đếm ngược và giờ reset chính xác theo GMT+7. |
-| ⚪ | **Usage Cursor** | % usage của gói trong chu kỳ thanh toán hiện tại. *Đang thử nghiệm.* |
 | 🟢 | **Task đang chạy** | Số phiên Claude Code trên máy này đang làm việc. |
 | 🔥 | **Token hôm nay** | Tổng token Claude Code đã dùng trong ngày, có chi tiết input, output và cache. Ngọn lửa cháy nhanh hơn khi có task đang chạy. |
-| 👥 | **Nhiều tài khoản Claude** | Mỗi profile Claude Code phụ (`CLAUDE_CONFIG_DIR`) có một vòng gọn: vòng ngoài là limit 5 giờ, vòng trong là limit tuần, chữ cái đầu của tài khoản ở giữa. Token hết hạn được tự làm mới. |
+| 👥 | **Nhiều tài khoản Claude** | Mỗi profile Claude Code phụ (`CLAUDE_CONFIG_DIR`) có một vòng gọn: vòng ngoài là limit 5 giờ, vòng trong là limit tuần, chữ cái đầu của tài khoản ở giữa. |
 | 🔔 | **Thông báo thông minh** | Báo khi limit chạm 80% / 95%, khi limit vừa reset, cảnh báo sớm khi với tốc độ hiện tại sẽ hết trước giờ reset, và báo khi một task Claude Code chạy xong (kèm tên phiên và thời gian chạy). |
 | 📈 | **Dự báo tốc độ** | Ước tính tốc độ tiêu thụ và thời điểm chạm 100%, ví dụ *"~20%/giờ → chạm 100% lúc 16:40, trước reset 1g"*. |
 | 📊 | **Biểu đồ token** | Biểu đồ nhiệt kiểu GitHub cho token Claude Code: theo giờ trong 14 ngày gần nhất và theo ngày trong 6 tháng. Bấm vào bộ đếm 🔥 để mở. Có thể bỏ phần cache đọc. |
@@ -54,7 +53,6 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 - macOS 14 Sonoma trở lên, chip Apple hoặc Intel
 - Đã cài [Claude Code](https://code.claude.com) và đăng nhập bằng tài khoản Pro, Max, Team hoặc Enterprise (`claude` → `/login`)
-- *Không bắt buộc:* [Cursor](https://cursor.com) đã đăng nhập
 
 ## Cài đặt
 
@@ -66,7 +64,7 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
      ```bash
      xattr -dr com.apple.quarantine /Applications/AiUsage.app
      ```
-4. Nếu macOS hỏi quyền truy cập Keychain để đọc thông tin đăng nhập Claude Code, bấm **Always Allow**.
+4. Bấm vào tab, mở **Cài đặt** và chọn **Kết nối Claude Code**. Sau đó gửi một tin nhắn trong Claude Code để có số liệu đầu tiên.
 5. *Không bắt buộc:* muốn app tự chạy khi mở máy thì thêm AiUsage vào **System Settings → General → Login Items**.
 
 ## Cách dùng
@@ -84,13 +82,12 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 | --- | --- |
 | Làm mới | Cập nhật số liệu ngay |
 | Hiển thị % còn lại | Hiện % còn lại thay vì % đã dùng |
-| Cập nhật limit mỗi | Tần suất gọi API usage: 1, 2, 5 (mặc định), 10, 15 hoặc 30 phút |
+| Kết nối Claude Code | Đăng ký AiUsage làm status line của Claude Code cho mọi profile (xem [Cách hoạt động](#cách-hoạt-động)) |
 | Luôn nằm trên cửa sổ khác | Tab nằm trên các cửa sổ khác. Tắt đi thì tab chỉ hiện trên desktop. |
 | Ngôn ngữ / Language | Tiếng Việt / English |
 | Hiển thị trên màn hình | Chọn màn hình đặt tab. Chỉ hiện khi máy nối từ 2 màn hình trở lên. |
 | Hiện token hôm nay | Bật/tắt bộ đếm token 🔥 |
 | Hiện số task đang chạy | Bật/tắt badge task |
-| Hiện Cursor | Bật/tắt vòng Cursor |
 | Hiện trên menu bar | Bật/tắt icon trên menu bar |
 | Thông báo | Chọn loại thông báo muốn nhận, gửi thông báo thử |
 | Tự chạy khi mở máy | Tự khởi động AiUsage khi đăng nhập máy |
@@ -101,8 +98,7 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 | Dữ liệu | Nguồn | Tần suất cập nhật |
 | --- | --- | --- |
-| Limit Claude | Gọi `api.anthropic.com/api/oauth/usage` bằng token OAuth của Claude Code trong Keychain. Nếu Keychain có nhiều mục trùng tên, app dùng mục được sửa gần nhất. | mỗi 5 phút (chỉnh được 1–30 phút) |
-| Usage Cursor | Lấy access token trong file `state.vscdb` của Cursor, rồi gọi `cursor.com/api/usage-summary`. Gói cũ tính theo request thì dùng `/api/usage`. | mỗi 5 phút (chỉnh được 1–30 phút) |
+| Limit Claude | Lấy từ [dữ liệu status line](https://code.claude.com/docs/en/statusline) mà Claude Code tự cung cấp (`rate_limits.five_hour`, `rate_limits.seven_day`). AiUsage được đăng ký làm lệnh status line (`AiUsage --statusline`). Sau mỗi phản hồi, lệnh này lưu số liệu vào `~/Library/Application Support/AiUsage/limits/`, rồi app đọc thư mục đó. | sau mỗi phản hồi của Claude Code |
 | Task đang chạy | Đọc `~/.claude/sessions/*.json`. Một phiên được đếm khi `status` là `"busy"` và process của nó vẫn còn chạy. | 2 giây |
 | Token hôm nay | Cộng các trường `usage` trong `~/.claude/projects/**/*.jsonl`. App chỉ đọc phần mới ghi thêm, mỗi câu trả lời chỉ tính một lần, và tổng về 0 lúc 0h theo giờ máy. | 30 giây |
 
@@ -112,7 +108,7 @@ App còn có icon trên menu bar, hiện ✦ kèm % phiên 5 giờ.
 
 **Khi máy thức dậy.** AiUsage làm mới toàn bộ số liệu vài giây sau khi mở nắp máy.
 
-**Giới hạn tần suất.** Nếu API Claude trả lỗi HTTP 429, AiUsage vẫn hiện số liệu gần nhất và chờ lâu dần trước khi thử lại, bắt đầu từ 2 phút và tối đa 15 phút.
+**Không dùng token, không gọi API.** AiUsage không đọc, không làm mới và không gửi thông tin đăng nhập Claude của bạn. Số liệu chỉ cập nhật khi bạn dùng Claude Code, cũng là lúc limit thay đổi. Khi qua giờ reset của một khung, AiUsage hiện khung đó trống lại.
 
 ## Nhiều tài khoản
 
@@ -131,15 +127,14 @@ alias claude2='CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude'
 alias claude3='CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude'
 ```
 
-AiUsage tự tìm mọi lần đăng nhập trong Keychain. `~/.claude` là tài khoản chính và hiện đầy đủ các vòng. Mỗi profile còn lại có một vòng tài khoản. Nên đặt tên thư mục profile dạng `~/.claude-*` để AiUsage hiện được email của tài khoản.
+**Kết nối Claude Code** thêm status line cho `~/.claude` và mọi profile `~/.claude-*`. `~/.claude` là tài khoản chính và hiện đầy đủ các vòng. Mỗi profile còn lại có một vòng tài khoản sau lần phản hồi đầu tiên. Nên đặt tên thư mục profile dạng `~/.claude-*` để AiUsage tìm thấy.
 
-Khi token của một profile hết hạn, AiUsage làm mới giống cách Claude Code làm, rồi ghi token mới lại vào mục Keychain của profile đó, nên Claude Code vẫn dùng bình thường. Nếu đang có phiên Claude Code chạy bằng profile đó, AiUsage để Claude Code tự làm mới.
+Nếu một profile đã có status line riêng, AiUsage không đụng vào. Mỗi file settings được sao lưu một lần thành `settings.json.aiusage-backup`.
 
 ## Quyền riêng tư & bảo mật
 
-- **Chỉ đọc, trừ một ngoại lệ.** AiUsage không sửa dữ liệu của Claude Code hay Cursor. Việc ghi duy nhất là lưu token OAuth vừa làm mới trở lại đúng mục Keychain đã đọc, giống hệt việc Claude Code tự làm.
-- **Không thu thập dữ liệu.** App chỉ gửi request tới hai endpoint usage ở trên, endpoint làm mới token OAuth của Claude, và API GitHub Releases để kiểm tra bản mới.
-- **Token chỉ nằm trong bộ nhớ.** Thông tin đăng nhập được đọc khi cần, không bao giờ ghi ra ổ đĩa hay log.
+- **Không đụng tới đăng nhập.** AiUsage không đọc Keychain và không dùng token Claude nào. Thay đổi duy nhất với Claude Code là dòng `statusLine` do **Kết nối Claude Code** thêm vào.
+- **Không thu thập dữ liệu.** Request mạng duy nhất là tới API GitHub Releases để kiểm tra bản mới.
 - **Dễ kiểm tra.** Toàn bộ app nằm trong một file Swift ([`AiUsage.swift`](AiUsage.swift)).
 
 ## Xử lý sự cố
@@ -147,9 +142,8 @@ Khi token của một profile hết hạn, AiUsage làm mới giống cách Clau
 | Hiện tượng | Cách xử lý |
 | --- | --- |
 | *"AiUsage can't be opened"* | Xem bước 3 ở phần [Cài đặt](#cài-đặt). |
-| Vòng trống hoặc hiện **!** | Mở menu để đọc dòng ⚠︎. Nếu token hết hạn, mở Claude Code một lần để nó làm mới token. |
-| ⚠︎ "giới hạn tần suất" | App vẫn hiện số liệu gần nhất và tự hồi phục sau 2–15 phút. Tránh tắt mở app liên tục. |
-| Không thấy vòng Cursor | Kiểm tra Cursor đã đăng nhập và mục **Hiện Cursor** đang bật. |
+| Vòng đỏ **!** | AiUsage chưa kết nối, hoặc Claude Code chưa báo số liệu nào. Chọn **Cài đặt → Kết nối Claude Code**, rồi gửi một tin nhắn trong Claude Code. |
+| Số liệu có vẻ cũ | Số liệu cập nhật sau mỗi phản hồi của Claude Code. Rê chuột lên **Làm mới** để xem lần cập nhật gần nhất. |
 | Finder hoặc Launchpad còn icon cũ | Chạy `killall Dock`. |
 
 ## Build từ mã nguồn
@@ -171,7 +165,7 @@ Cần cài Xcode Command Line Tools (`xcode-select --install`).
 
 ## Miễn trừ trách nhiệm
 
-AiUsage là dự án độc lập, không liên kết, không được bảo trợ hay tài trợ bởi Anthropic hoặc Anysphere (Cursor). "Claude" và "Cursor" là thương hiệu của các chủ sở hữu tương ứng. Các endpoint usage không có tài liệu chính thức và có thể thay đổi hoặc ngừng hoạt động bất cứ lúc nào.
+AiUsage là dự án độc lập, không liên kết, không được bảo trợ hay tài trợ bởi Anthropic. "Claude" là thương hiệu của Anthropic. App dựa vào dữ liệu status line chính thức của Claude Code, các trường dữ liệu có thể thay đổi giữa các phiên bản Claude Code.
 
 ## Giấy phép
 

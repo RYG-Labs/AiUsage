@@ -5,7 +5,7 @@
 # AiUsage
 
 **Your AI coding usage, always in view.**<br>
-A native macOS side widget for Claude Code and Cursor usage limits, running tasks and daily token burn.
+A native macOS side widget for Claude Code usage limits, running tasks and daily token burn.
 
 [![macOS](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](AiUsage.swift)
@@ -37,10 +37,9 @@ A native macOS side widget for Claude Code and Cursor usage limits, running task
 | | Feature | Details |
 | :-: | --- | --- |
 | 🟠 | **Claude limits** | Usage of the 5-hour session and the weekly limit, plus the Opus/Sonnet weekly limits if your plan has them. Shows a countdown and the exact reset time in GMT+7. |
-| ⚪ | **Cursor usage** | % of the included plan usage in the current billing cycle. *Experimental.* |
 | 🟢 | **Running tasks** | Number of Claude Code sessions on this Mac that are working right now. |
 | 🔥 | **Tokens today** | Total Claude Code tokens used today, with a breakdown of input, output and cache. The flame flickers faster while a task is running. |
-| 👥 | **Multiple Claude accounts** | Each extra Claude Code profile (`CLAUDE_CONFIG_DIR`) gets a compact ring: the outer ring is the 5-hour limit, the inner ring is the weekly limit, and the account initial sits in the middle. Expired tokens are refreshed automatically. |
+| 👥 | **Multiple Claude accounts** | Each extra Claude Code profile (`CLAUDE_CONFIG_DIR`) gets a compact ring: the outer ring is the 5-hour limit, the inner ring is the weekly limit, and the account initial sits in the middle. |
 | 🔔 | **Smart notifications** | Alerts at 80% / 95%, when a limit resets, an early warning when your pace will run out before the reset, and when a Claude Code task finishes (with its name and duration). |
 | 📈 | **Pace forecast** | Estimates your burn rate and when you would hit 100% at the current pace, for example *"~20%/h → hits 100% at 16:40, 1h before reset"*. |
 | 📊 | **Token chart** | GitHub-style heatmaps of Claude Code tokens: by hour over the last 14 days, and by day over the last 6 months. Click the 🔥 counter to open it. You can exclude cache reads. |
@@ -54,7 +53,6 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 - macOS 14 Sonoma or later, on Apple Silicon or Intel
 - [Claude Code](https://code.claude.com), signed in with a Pro, Max, Team or Enterprise account (`claude` → `/login`)
-- *Optional:* [Cursor](https://cursor.com), signed in
 
 ## Installation
 
@@ -66,7 +64,7 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
      ```bash
      xattr -dr com.apple.quarantine /Applications/AiUsage.app
      ```
-4. If macOS asks for Keychain access to the Claude Code credentials, click **Always Allow**.
+4. Click the tab, open **Settings**, and choose **Connect Claude Code**. Then send one message in Claude Code to get the first numbers.
 5. *Optional:* to start AiUsage at login, add it under **System Settings → General → Login Items**.
 
 ## Usage
@@ -84,13 +82,12 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 | --- | --- |
 | Refresh | Fetch usage now |
 | Show % remaining | Show remaining % instead of used % |
-| Check limits every | How often the usage APIs are called: 1, 2, 5 (default), 10, 15 or 30 minutes |
+| Connect Claude Code | Registers AiUsage as the Claude Code status line in every profile (see [How it works](#how-it-works)) |
 | Always on top of other windows | Keep the tab above other windows. Turn it off to show the tab on the desktop only. |
 | Language | Tiếng Việt / English |
 | Show on display | Choose which monitor the tab is on. Only appears with more than one display. |
 | Show today's tokens | Toggle the 🔥 token counter |
 | Show running task count | Toggle the running-task badge |
-| Show Cursor | Toggle the Cursor ring |
 | Show in menu bar | Toggle the menu bar item |
 | Notifications | Choose which alerts to receive, and send a test notification |
 | Launch at login | Start AiUsage automatically when you log in |
@@ -101,8 +98,7 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 | Data | Source | Refresh |
 | --- | --- | --- |
-| Claude limits | `api.anthropic.com/api/oauth/usage`, called with the Claude Code OAuth token from the login Keychain. If several Keychain items match, the most recently modified one is used. | every 5 min (configurable: 1–30 min) |
-| Cursor usage | Access token from Cursor's local `state.vscdb`, then `cursor.com/api/usage-summary`. Legacy request-based plans fall back to `/api/usage`. | every 5 min (configurable: 1–30 min) |
+| Claude limits | Claude Code's own [status line data](https://code.claude.com/docs/en/statusline) (`rate_limits.five_hour`, `rate_limits.seven_day`). AiUsage is registered as the status line command (`AiUsage --statusline`). After each response it saves the numbers to `~/Library/Application Support/AiUsage/limits/`, and the app reads that folder. | after every Claude Code response |
 | Running tasks | `~/.claude/sessions/*.json`. A session counts when its `status` is `"busy"` and its process is still alive. | 2 s |
 | Tokens today | `usage` fields in `~/.claude/projects/**/*.jsonl`. Files are read incrementally, each response is counted once, and the total resets at local midnight. | 30 s |
 
@@ -112,7 +108,7 @@ It also adds a menu bar item that shows ✦ and the 5-hour %.
 
 **Wake from sleep.** AiUsage refreshes everything a few seconds after the Mac wakes up.
 
-**Rate limits.** If the Claude API returns HTTP 429, AiUsage keeps showing the last known values and backs off, starting at 2 minutes and going up to 15 minutes.
+**No token, no API calls.** AiUsage never reads, refreshes or sends your Claude login. The numbers only update while you use Claude Code, which is when they change. Once a window's reset time passes, AiUsage shows it as empty again.
 
 ## Multiple accounts
 
@@ -131,15 +127,14 @@ alias claude2='CLAUDE_CONFIG_DIR=$HOME/.claude-2 claude'
 alias claude3='CLAUDE_CONFIG_DIR=$HOME/.claude-3 claude'
 ```
 
-AiUsage finds every login in the Keychain on its own. `~/.claude` is the main account and shows the full rings. Each other profile gets one account ring. Keep profile folders named `~/.claude-*` so AiUsage can show the account's email.
+**Connect Claude Code** adds the status line to `~/.claude` and every `~/.claude-*` profile. `~/.claude` is the main account and shows the full rings. Each other profile gets one account ring after its first response. Keep profile folders named `~/.claude-*` so AiUsage finds them.
 
-When a profile's token has expired, AiUsage refreshes it the same way Claude Code does and writes the new token back to that profile's Keychain item, so Claude Code keeps working. If a Claude Code session for that profile is running, AiUsage leaves the refresh to it.
+If a profile already has its own status line, AiUsage leaves it alone. AiUsage keeps a one-time backup of each settings file as `settings.json.aiusage-backup`.
 
 ## Privacy & security
 
-- **Read-only, with one exception.** AiUsage never modifies Claude Code or Cursor data. The only write is saving a refreshed OAuth token back to the same Keychain item it came from, which is exactly what Claude Code itself does.
-- **No telemetry.** The only network requests go to the two usage endpoints listed above, the Claude OAuth token endpoint (for refreshing tokens), and the GitHub Releases API (for update checks).
-- **Tokens stay in memory.** Credentials are read when needed and never written to disk or logs.
+- **Never touches your login.** AiUsage doesn't read the Keychain or use any Claude token. Its only change to Claude Code is the `statusLine` entry that **Connect Claude Code** adds.
+- **No telemetry.** The only network request is to the GitHub Releases API, to check for updates.
 - **Auditable.** The whole app is one Swift file ([`AiUsage.swift`](AiUsage.swift)).
 
 ## Troubleshooting
@@ -147,9 +142,8 @@ When a profile's token has expired, AiUsage refreshes it the same way Claude Cod
 | Symptom | Fix |
 | --- | --- |
 | *"AiUsage can't be opened"* | See step 3 of [Installation](#installation). |
-| Rings are empty or show **!** | Open the menu to read the ⚠︎ message. If the token has expired, open Claude Code once so it refreshes the token. |
-| ⚠︎ "rate limited" | The last known values are still shown. It recovers on its own within 2–15 minutes. Avoid restarting the app repeatedly. |
-| No Cursor ring | Make sure Cursor is signed in, and check that **Show Cursor** is enabled. |
+| Red **!** ring | AiUsage isn't connected yet, or Claude Code hasn't reported any numbers yet. Choose **Settings → Connect Claude Code**, then send a message in Claude Code. |
+| Numbers look old | They update after each Claude Code response. Hover **Refresh** to see when they were last updated. |
 | Old icon in Finder or Launchpad | Run `killall Dock`. |
 
 ## Build from source
@@ -171,7 +165,7 @@ Requires Xcode Command Line Tools (`xcode-select --install`).
 
 ## Disclaimer
 
-AiUsage is an independent project. It is not affiliated with, endorsed by, or sponsored by Anthropic or Anysphere (Cursor). "Claude" and "Cursor" are trademarks of their respective owners. The usage endpoints are undocumented and may change or break at any time.
+AiUsage is an independent project. It is not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" is a trademark of Anthropic. It relies on the documented Claude Code status line data, whose fields may change between Claude Code versions.
 
 ## License
 

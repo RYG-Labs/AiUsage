@@ -1,24 +1,11 @@
 import SwiftUI
 import AppKit
 import Combine
-import Security
 import CryptoKit
 @preconcurrency import UserNotifications
 import ServiceManagement
 
 // MARK: - Model
-
-struct UsageWindow: Decodable {
-    let utilization: Double?
-    let resets_at: String?
-}
-
-struct UsageResponse: Decodable {
-    let five_hour: UsageWindow?
-    let seven_day: UsageWindow?
-    let seven_day_opus: UsageWindow?
-    let seven_day_sonnet: UsageWindow?
-}
 
 struct ClaudeSession: Equatable {
     let pid: Int
@@ -27,15 +14,13 @@ struct ClaudeSession: Equatable {
     var isBusy: Bool { status == "busy" }
 }
 
-/// One Claude login. Claude Code keeps one Keychain item per config dir:
-/// "Claude Code-credentials" for ~/.claude, and "Claude Code-credentials-<sha256(dir)[0:8]>"
-/// for each CLAUDE_CONFIG_DIR profile.
+/// One Claude Code profile: ~/.claude, or a CLAUDE_CONFIG_DIR folder signed in to another account.
 struct ClaudeAccount: Equatable, Sendable {
-    static let defaultService = "Claude Code-credentials"
-    let service: String
+    static let defaultConfigDir = NSHomeDirectory() + "/.claude"
+    let service: String          // stable id: the config dir path
     let configDir: String?
     let email: String?
-    var isDefault: Bool { service == Self.defaultService }
+    var isDefault: Bool { configDir == Self.defaultConfigDir }
     var label: String {
         email ?? configDir.map { ($0 as NSString).lastPathComponent } ?? service
     }
@@ -51,7 +36,7 @@ struct AccountUsage: Identifiable, Equatable {
     func limit(_ k: LimitKind) -> Limit? { limits.first { $0.kind == k } }
 }
 
-enum LimitKind: String, Codable { case fiveHour, week, opus, sonnet, cursor }
+enum LimitKind: String, Codable { case fiveHour, week, opus, sonnet }
 
 struct Limit: Identifiable, Codable, Equatable {
     let kind: LimitKind
@@ -62,53 +47,189 @@ struct Limit: Identifiable, Codable, Equatable {
     var remaining: Double { max(0, 100 - used) }
 }
 
+// MARK: - Status line bridge
+
+/// Where the numbers come from, without ever touching your login.
+///
+/// After each response Claude Code passes its own rate-limit numbers (`rate_limits.five_hour`,
+/// `rate_limits.seven_day`) to the status line command. AiUsage registers itself as that command
+/// (`AiUsage --statusline`): it saves the numbers to one small file per profile and prints a short
+/// status. The app then just reads those files. No OAuth token is read, refreshed or sent anywhere.
+enum Bridge {
+    static var dir: URL {
+        let d = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AiUsage/limits", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    static func normalize(_ path: String) -> String {
+        var p = (path as NSString).expandingTildeInPath
+        p = (p as NSString).standardizingPath
+        while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
+        return p
+    }
+
+    static func fileURL(for configDir: String) -> URL {
+        dir.appendingPathComponent(UsageStore.hash8(configDir) + ".json")
+    }
+
+    static func num(_ v: Any?) -> Double? {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        if let s = v as? String { return Double(s) }
+        return nil
+    }
+
+    // MARK: Claude Code side
+
+    /// Entry point when Claude Code runs `AiUsage --statusline`. Must stay fast and quiet.
+    static func runStatusLine() -> Never {
+        let input = FileHandle.standardInput.readDataToEndOfFile()
+        let obj = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] ?? [:]
+        let configDir = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].map(normalize)
+            ?? ClaudeAccount.defaultConfigDir
+        var parts: [String] = []
+        if let model = (obj["model"] as? [String: Any])?["display_name"] as? String { parts.append(model) }
+        if let rl = obj["rate_limits"] as? [String: Any] {
+            var out: [String: Any] = ["configDir": configDir, "updatedAt": Date().timeIntervalSince1970]
+            for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
+                guard let w = rl[key] as? [String: Any] else { continue }
+                out[key] = w
+                if let p = num(w["used_percentage"]) { parts.append("\(label) \(Int(p.rounded()))%") }
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: out) {
+                try? data.write(to: fileURL(for: configDir), options: .atomic)
+            }
+        }
+        print(parts.joined(separator: " · "))
+        exit(0)
+    }
+
+    // MARK: App side
+
+    struct Snapshot {
+        let configDir: String
+        let updatedAt: Date
+        let limits: [Limit]
+    }
+
+    static func read() -> [Snapshot] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let now = Date()
+        return files.filter { $0.pathExtension == "json" }.compactMap { url in
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let configDir = obj["configDir"] as? String,
+                  let updated = num(obj["updatedAt"]) else { return nil }
+            var limits: [Limit] = []
+            for (key, kind) in [("five_hour", LimitKind.fiveHour), ("seven_day", LimitKind.week)] {
+                guard let w = obj[key] as? [String: Any], let used = num(w["used_percentage"]) else { continue }
+                let reset = num(w["resets_at"]).map { Date(timeIntervalSince1970: $0) }
+                if let reset, reset <= now {
+                    // The window rolled over since Claude Code last reported: it's empty again.
+                    limits.append(Limit(kind: kind, title: "", used: 0, resetsAt: nil))
+                } else {
+                    limits.append(Limit(kind: kind, title: "", used: min(100, max(0, used)), resetsAt: reset))
+                }
+            }
+            return Snapshot(configDir: configDir, updatedAt: Date(timeIntervalSince1970: updated), limits: limits)
+        }
+    }
+
+    /// ~/.claude plus every ~/.claude-* folder that looks like a Claude Code profile.
+    static func profiles() -> [String] {
+        let home = NSHomeDirectory()
+        var out = [ClaudeAccount.defaultConfigDir]
+        for n in ((try? FileManager.default.contentsOfDirectory(atPath: home)) ?? []).sorted() where n.hasPrefix(".claude-") {
+            let p = home + "/" + n
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue else { continue }
+            if FileManager.default.fileExists(atPath: p + "/.claude.json") || FileManager.default.fileExists(atPath: p + "/settings.json") {
+                out.append(p)
+            }
+        }
+        return out
+    }
+
+    enum InstallState: Equatable { case installed, missing, other(String) }
+
+    static var command: String { "\"\(Bundle.main.executablePath ?? "/Applications/AiUsage.app/Contents/MacOS/AiUsage")\" --statusline" }
+
+    private static func settingsURL(_ configDir: String) -> URL {
+        URL(fileURLWithPath: configDir).appendingPathComponent("settings.json")
+    }
+
+    private static func readSettings(_ configDir: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: settingsURL(configDir)) else { return [:] }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]   // nil = unreadable, leave it alone
+    }
+
+    static func state(_ configDir: String) -> InstallState {
+        guard let cmd = (readSettings(configDir)?["statusLine"] as? [String: Any])?["command"] as? String else { return .missing }
+        return cmd.contains("--statusline") && cmd.contains("AiUsage") ? .installed : .other(cmd)
+    }
+
+    /// Adds AiUsage as the status line of one profile. Never replaces someone else's status line.
+    @discardableResult
+    static func install(_ configDir: String) -> InstallState {
+        let current = state(configDir)
+        if case .other = current { return current }
+        guard var settings = readSettings(configDir) else { return .other("settings.json unreadable") }
+        let url = settingsURL(configDir)
+        if FileManager.default.fileExists(atPath: url.path) {
+            let backup = url.deletingLastPathComponent().appendingPathComponent("settings.json.aiusage-backup")
+            if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: url, to: backup) }
+        }
+        settings["statusLine"] = ["type": "command", "command": command, "padding": 0]
+        guard let data = try? JSONSerialization.data(withJSONObject: settings,
+                                                     options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              (try? data.write(to: url, options: .atomic)) != nil else { return .missing }
+        return .installed
+    }
+
+    static func installAll() -> [(String, InstallState)] {
+        profiles().map { ($0, install($0)) }
+    }
+}
+
 @MainActor
 final class UsageStore: ObservableObject {
     static let shared = UsageStore()
     @Published var limits: [Limit] = []
     @Published var error: String?
-    @Published var cursorError: String?
     @Published var lastUpdate: Date?
-    @Published var loading = false
     @Published var sessions: [ClaudeSession] = []
     @Published var tokens = TokenTotals()
     @Published var forecasts: [LimitKind: Forecast] = [:]
     @Published var update: AppUpdate?
-    /// Signed-in account for ~/.claude (what the desktop app and plain `claude` use).
+    /// Profile in ~/.claude (what the desktop app and plain `claude` use).
     @Published var defaultAccount: ClaudeAccount?
     /// Other CLAUDE_CONFIG_DIR profiles, each with its own limits.
     @Published var accounts: [AccountUsage] = []
-    private var accountNextAttempt: [String: Date] = [:]
-    private var accountBackoff: [String: TimeInterval] = [:]
     /// Config dirs to scan for sessions and transcripts (read from background threads).
-    nonisolated(unsafe) static var configDirs: [String] = [NSHomeDirectory() + "/.claude"]
+    nonisolated(unsafe) static var configDirs: [String] = [ClaudeAccount.defaultConfigDir]
 
     let watcher = LimitWatcher()
     private var busySince: [Int: Date] = [:]
     private var sessionsPrimed = false
     private var updateTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
+    private var lastIngested: [String: [Limit]] = [:]
 
     private let tokenCounter = TokenCounter()
     private var tokenTimer: Timer?
-
     private var sessionTimer: Timer?
-    private var claudeLimits: [Limit] = UsageStore.loadCachedClaude()
-    private var claudeNextAttempt = Date.distantPast
-    private var claudeBackoff: TimeInterval = 0
-    private var cursorLimits: [Limit] = []
+    private var claudeLimits: [Limit] = []
     private var timer: Timer?
-    /// How often the usage APIs are called (Claude, Cursor, extra accounts). Default 5 minutes.
-    static let intervalChoices: [TimeInterval] = [60, 120, 300, 600, 900, 1800]
-    var interval: TimeInterval {
-        let v = UserDefaults.standard.object(forKey: Pref.refreshInterval) as? Double ?? 300
-        return v >= 60 ? v : 300
-    }
 
     init() {
-        recompose()
         refresh()
-        scheduleRefresh()
+        // Reading a few tiny local files: cheap enough to do often.
+        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        timer?.tolerance = 3
         refreshTokens()
         tokenTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshTokens() }
@@ -117,13 +238,10 @@ final class UsageStore: ObservableObject {
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshSessions() }
         }
-        // After the lid opens, refresh right away instead of waiting for the next tick.
-        // Wait a few seconds so Wi-Fi can reconnect first.
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                try? await Task.sleep(for: .seconds(5))
                 self?.refresh()
                 self?.refreshSessions()
                 self?.refreshTokens()
@@ -199,15 +317,6 @@ final class UsageStore: ObservableObject {
         return false
     }
 
-    /// (Re)starts the API polling timer; called at launch and when the interval setting changes.
-    func scheduleRefresh() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        timer?.tolerance = 10
-    }
-
     func refreshTokens() {
         let counter = tokenCounter
         Task.detached(priority: .utility) {
@@ -262,284 +371,76 @@ final class UsageStore: ObservableObject {
 
     var fiveHour: Limit? { limits.first { $0.kind == .fiveHour } }
 
-    /// Rebuild the visible list (Claude first, then Cursor if enabled).
     func recompose() {
-        let showCursor = UserDefaults.standard.bool(forKey: Pref.showCursor)
-        // While the main account can't be read (429, expired login…) show a single red
-        // ring instead of stale numbers, so it's obvious something needs attention.
-        limits = (error == nil ? claudeLimits : []) + (showCursor ? cursorLimits : [])
+        limits = error == nil ? claudeLimits : []
     }
 
-    /// Rings on the tab: limits + the red error ring + one per extra account.
+    /// Rings on the tab: limits + the red "not connected" ring + one per extra account.
     var ringCount: Int { max(1, limits.count + (error != nil ? 1 : 0) + accounts.count) }
 
+    /// Picks up whatever Claude Code last reported through the status line.
     func refresh() {
-        guard !loading else { return }
-        loading = true
-        Task {
-            defer { loading = false }
-            let found = await Task.detached { Self.discoverAccounts() }.value
-            let home = NSHomeDirectory() + "/.claude"
-            let def = found.first(where: \.isDefault)
-                ?? ClaudeAccount(service: ClaudeAccount.defaultService, configDir: home, email: Self.accountEmail(configDir: home))
-            defaultAccount = def
-            Self.configDirs = Array(Set([home] + found.compactMap(\.configDir))).sorted()
-            let tryClaude = Date() >= claudeNextAttempt
-            async let claude = tryClaude ? Result(catching: { try await Self.fetchClaude(def) }) : nil
-            async let cursor = Result(catching: { try await Self.fetchCursor() })
+        let snaps = Bridge.read()
+        let home = ClaudeAccount.defaultConfigDir
+        Self.configDirs = Array(Set([home] + Bridge.profiles() + snaps.map(\.configDir))).sorted()
+        defaultAccount = ClaudeAccount(service: home, configDir: home, email: Self.accountEmail(configDir: home))
 
-            switch await claude {
-            case .success(let l)?:
-                claudeLimits = l; error = nil; claudeBackoff = 0
-                Self.saveCachedClaude(l)
-                for x in l { forecasts[x.kind] = watcher.ingest(x) }
-            case .failure(let e)?:
-                // Keep showing the last known numbers; back off when rate limited.
-                if case .rateLimited = e as? WidgetError {
-                    claudeBackoff = min(900, max(120, claudeBackoff * 2))
-                    claudeNextAttempt = Date().addingTimeInterval(claudeBackoff)
-                    let mins = Int(claudeBackoff / 60)
-                    error = L.t("Claude API từ chối vì gọi quá nhiều (429) — tự thử lại sau \(mins) phút",
-                                 "Claude API is rate-limiting (429) — retrying in \(mins) min")
-                } else {
-                    error = (e as? WidgetError)?.text ?? e.localizedDescription
-                }
-            case nil: break
+        if let main = snaps.first(where: { $0.configDir == home }), !main.limits.isEmpty {
+            claudeLimits = main.limits
+            error = nil
+            lastUpdate = main.updatedAt
+            if lastIngested[home] != main.limits {
+                lastIngested[home] = main.limits
+                for x in main.limits { forecasts[x.kind] = watcher.ingest(x) }
             }
-            switch await cursor {
-            case .success(let l):
-                cursorLimits = l; cursorError = nil
-                for x in l { forecasts[x.kind] = watcher.ingest(x) }
-            case .failure(let e): cursorError = (e as? WidgetError)?.text ?? e.localizedDescription
-            }
-            await refreshExtraAccounts(found.filter { !$0.isDefault })
-            recompose()
-            lastUpdate = Date()
+        } else {
+            claudeLimits = []
+            error = Bridge.state(home) == .installed
+                ? L.t("Chưa nhận số liệu — gửi một tin nhắn trong Claude Code là có",
+                      "No numbers yet — send a message in Claude Code")
+                : L.t("Chưa kết nối Claude Code — bấm vào tab → Kết nối Claude Code",
+                      "Not connected — click the tab → Connect Claude Code")
         }
-    }
 
-    /// Fetches every non-default profile one after another, keeping the last good numbers
-    /// on failure and backing off per account when rate-limited.
-    private func refreshExtraAccounts(_ list: [ClaudeAccount]) async {
         var out: [AccountUsage] = []
-        for acct in list {
-            var u = accounts.first { $0.id == acct.service } ?? AccountUsage(account: acct)
-            u = AccountUsage(account: acct, limits: u.limits, forecasts: u.forecasts, error: u.error)
-            if Date() >= accountNextAttempt[acct.service] ?? .distantPast {
-                do {
-                    let l = try await Self.fetchClaude(acct)
-                    u.limits = l
-                    u.error = nil
-                    accountBackoff[acct.service] = 0
-                    for x in l { u.forecasts[x.kind] = watcher.ingest(x, account: acct) }
-                } catch {
-                    if case .rateLimited = error as? WidgetError {
-                        let b = min(900, max(120, (accountBackoff[acct.service] ?? 0) * 2))
-                        accountBackoff[acct.service] = b
-                        accountNextAttempt[acct.service] = Date().addingTimeInterval(b)
-                    }
-                    u.error = (error as? WidgetError)?.text ?? error.localizedDescription
-                }
+        for snap in snaps where snap.configDir != home && !snap.limits.isEmpty {
+            let acct = ClaudeAccount(service: snap.configDir, configDir: snap.configDir,
+                                     email: Self.accountEmail(configDir: snap.configDir))
+            var u = AccountUsage(account: acct, limits: snap.limits)
+            u.forecasts = accounts.first { $0.id == acct.service }?.forecasts ?? [:]
+            if lastIngested[snap.configDir] != snap.limits {
+                lastIngested[snap.configDir] = snap.limits
+                for x in snap.limits { u.forecasts[x.kind] = watcher.ingest(x, account: acct) }
             }
             out.append(u)
         }
+        out.sort { $0.account.label < $1.account.label }
         if out != accounts { accounts = out }
+        recompose()
     }
+
+    /// Hooks AiUsage into every profile's Claude Code status line and reports what happened.
+    func connectClaudeCode() {
+        let results = Bridge.installAll()
+        let ok = results.filter { $0.1 == .installed }.count
+        let skipped = results.compactMap { r -> String? in
+            if case .other = r.1 { return (r.0 as NSString).lastPathComponent }
+            return nil
+        }
+        var body = L.t("Đã kết nối \(ok) profile. Gửi một tin nhắn trong Claude Code để có số liệu.",
+                       "Connected \(ok) profile(s). Send a message in Claude Code to get numbers.")
+        if !skipped.isEmpty {
+            body += L.t(" Bỏ qua (đang dùng status line khác): ", " Skipped (another status line in use): ") + skipped.joined(separator: ", ")
+        }
+        Notifier.post("AiUsage", body)
+        refresh()
+    }
+
+    var allConnected: Bool { Bridge.profiles().allSatisfy { Bridge.state($0) == .installed } }
 
     enum WidgetError: Error {
         case msg(String)
-        case rateLimited
-        var text: String {
-            switch self {
-            case .msg(let s): return s
-            case .rateLimited: return L.t("Bị giới hạn tần suất (HTTP 429)", "Rate-limited (HTTP 429)")
-            }
-        }
-    }
-
-    nonisolated static let cacheKey = "cachedClaudeLimits"
-
-    nonisolated static func loadCachedClaude() -> [Limit] {
-        guard let d = UserDefaults.standard.data(forKey: cacheKey),
-              let l = try? JSONDecoder().decode([Limit].self, from: d) else { return [] }
-        return l
-    }
-
-    nonisolated static func saveCachedClaude(_ l: [Limit]) {
-        if let d = try? JSONEncoder().encode(l) { UserDefaults.standard.set(d, forKey: cacheKey) }
-    }
-
-    // MARK: Claude
-
-    nonisolated static func fetchClaude(_ account: ClaudeAccount) async throws -> [Limit] {
-        let token = try await claudeToken(for: account)
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("aiusage/1.0", forHTTPHeaderField: "User-Agent")
-        req.timeoutInterval = 15
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401 {
-            throw WidgetError.msg(L.t("Token hết hạn — mở Claude Code bằng tài khoản này một lần để làm mới",
-                                       "Token expired — open Claude Code with this account once to refresh it"))
-        }
-        if code == 429 { throw WidgetError.rateLimited }
-        guard code == 200 else { throw WidgetError.msg("Claude: HTTP \(code)") }
-        let r = try JSONDecoder().decode(UsageResponse.self, from: data)
-        var out: [Limit] = []
-        func add(_ kind: LimitKind, _ title: String, _ w: UsageWindow?) {
-            guard let w, let u = w.utilization else { return }
-            out.append(Limit(kind: kind, title: title, used: u, resetsAt: w.resets_at.flatMap(parseDate)))
-        }
-        add(.fiveHour, "Phiên 5 giờ", r.five_hour)
-        add(.week, "Tuần (7 ngày)", r.seven_day)
-        add(.opus, "Tuần — Opus", r.seven_day_opus)
-        add(.sonnet, "Tuần — Sonnet", r.seven_day_sonnet)
-        return out
-    }
-
-    /// Reads the Claude Code credentials JSON for one Keychain service.
-    ///
-    /// Switching Claude accounts can leave more than one item under the same service name
-    /// (the CLI adds a fresh entry per account instead of always overwriting in place),
-    /// and `security find-generic-password` only ever returns a single arbitrary match.
-    /// Querying via the Security framework lets us list every match and pick the one most
-    /// recently written, so a newly logged-in account is picked up right away.
-    nonisolated static func loadCreds(service: String) throws -> (ref: CFTypeRef, root: [String: Any]) {
-        // Step 1: list attributes only (no secret material, so no Keychain prompt).
-        let listQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-            kSecReturnPersistentRef as String: true,
-        ]
-        let keychainError = L.t("Không đọc được token Claude Code trong Keychain",
-                                 "Couldn't read the Claude Code token from the Keychain")
-        var listResult: CFTypeRef?
-        guard SecItemCopyMatching(listQuery as CFDictionary, &listResult) == errSecSuccess,
-              let items = listResult as? [[String: Any]], !items.isEmpty
-        else { throw WidgetError.msg(keychainError) }
-        let newest = items.max { a, b in
-            let da = a[kSecAttrModificationDate as String] as? Date ?? .distantPast
-            let db = b[kSecAttrModificationDate as String] as? Date ?? .distantPast
-            return da < db
-        }
-        guard let ref = newest?[kSecValuePersistentRef as String] else { throw WidgetError.msg(keychainError) }
-
-        // Step 2: fetch the secret for that one item (may show the one-time access prompt).
-        let itemQuery: [String: Any] = [kSecValuePersistentRef as String: ref, kSecReturnData as String: true]
-        var itemResult: CFTypeRef?
-        guard SecItemCopyMatching(itemQuery as CFDictionary, &itemResult) == errSecSuccess,
-              let data = itemResult as? Data,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { throw WidgetError.msg(keychainError) }
-        return (ref as CFTypeRef, root)
-    }
-
-    /// Returns a usable access token, refreshing it first when it has expired.
-    ///
-    /// A refresh rotates the refresh token, so the new pair is written back to the same
-    /// Keychain item — exactly what Claude Code does — and Claude Code keeps working.
-    /// If a Claude Code session for that profile is running, it refreshes the token itself,
-    /// so we leave it alone to avoid racing it.
-    nonisolated static func claudeToken(for account: ClaudeAccount) async throws -> String {
-        let (ref, root) = try loadCreds(service: account.service)
-        guard var oauth = root["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String
-        else { throw WidgetError.msg(L.t("Không đọc được token Claude Code trong Keychain",
-                                          "Couldn't read the Claude Code token from the Keychain")) }
-        let expiresMs = num(oauth["expiresAt"]) ?? 0
-        let expired = expiresMs > 0 && Date(timeIntervalSince1970: expiresMs / 1000) < Date().addingTimeInterval(60)
-        guard expired, let refresh = oauth["refreshToken"] as? String else { return token }
-        if let dir = account.configDir, hasLiveSession(configDir: dir) { return token }
-
-        let fresh = try await refreshOAuth(refresh, scopes: oauth["scopes"] as? [String])
-        oauth["accessToken"] = fresh.access
-        if let r = fresh.refresh { oauth["refreshToken"] = r }
-        oauth["expiresAt"] = Int64((Date().timeIntervalSince1970 + fresh.expiresIn) * 1000)
-        var newRoot = root
-        newRoot["claudeAiOauth"] = oauth
-        let data = try JSONSerialization.data(withJSONObject: newRoot)
-        let status = SecItemUpdate([kSecValuePersistentRef as String: ref] as CFDictionary,
-                                   [kSecValueData as String: data] as CFDictionary)
-        guard status == errSecSuccess else {
-            throw WidgetError.msg(L.t("Không ghi được token mới vào Keychain (\(status))",
-                                       "Couldn't save the refreshed token to the Keychain (\(status))"))
-        }
-        return fresh.access
-    }
-
-    nonisolated static func refreshOAuth(_ refreshToken: String, scopes: [String]?) async throws
-        -> (access: String, refresh: String?, expiresIn: Double) {
-        var body: [String: Any] = [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",   // Claude Code's OAuth client
-        ]
-        if let scopes, !scopes.isEmpty { body["scope"] = scopes.joined(separator: " ") }
-        var req = URLRequest(url: URL(string: "https://platform.claude.com/v1/oauth/token")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        req.timeoutInterval = 30
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200,
-              let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let access = obj["access_token"] as? String
-        else {
-            throw WidgetError.msg(L.t("Làm mới token thất bại (HTTP \(code)) — mở Claude Code bằng tài khoản này để đăng nhập lại",
-                                       "Token refresh failed (HTTP \(code)) — open Claude Code with this account to sign in again"))
-        }
-        return (access, obj["refresh_token"] as? String, num(obj["expires_in"]) ?? 3600)
-    }
-
-    nonisolated static func hasLiveSession(configDir: String) -> Bool {
-        let dir = configDir + "/sessions"
-        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where f.hasSuffix(".json") {
-            if let data = FileManager.default.contents(atPath: dir + "/" + f),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let pid = obj["pid"] as? Int, kill(pid_t(pid), 0) == 0 { return true }
-        }
-        return false
-    }
-
-    // MARK: Accounts
-
-    /// Every Claude Code login in the Keychain, default (~/.claude) first.
-    nonisolated static func discoverAccounts() -> [ClaudeAccount] {
-        let q: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-        ]
-        var r: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &r) == errSecSuccess, let items = r as? [[String: Any]] else { return [] }
-        let prefix = ClaudeAccount.defaultService
-        let services = Set(items.compactMap { $0[kSecAttrService as String] as? String }.filter {
-            $0 == prefix || ($0.hasPrefix(prefix + "-") && $0.count == prefix.count + 9)   // "-" + 8 hex chars
-        })
-
-        // Map the 8-char suffix back to a config dir by hashing the candidate paths.
-        let home = NSHomeDirectory()
-        var candidates = [home + "/.claude"]
-        for n in (try? FileManager.default.contentsOfDirectory(atPath: home)) ?? [] where n.hasPrefix(".claude") {
-            var isDir: ObjCBool = false
-            let path = home + "/" + n
-            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue { candidates.append(path) }
-        }
-        var byHash: [String: String] = [:]
-        for c in candidates {
-            for v in [c, c + "/"] { byHash[hash8(v.precomposedStringWithCanonicalMapping)] = c }
-        }
-
-        return services.map { svc -> ClaudeAccount in
-            let dir = svc == prefix ? home + "/.claude" : byHash[String(svc.suffix(8))]
-            return ClaudeAccount(service: svc, configDir: dir, email: dir.flatMap { accountEmail(configDir: $0) })
-        }
-        .sorted { a, b in a.isDefault != b.isDefault ? a.isDefault : a.label < b.label }
+        var text: String { if case .msg(let s) = self { return s }; return "" }
     }
 
     nonisolated static func hash8(_ s: String) -> String {
@@ -555,116 +456,6 @@ final class UsageStore: ObservableObject {
               let acct = obj["oauthAccount"] as? [String: Any] else { return nil }
         return acct["emailAddress"] as? String
     }
-
-    // MARK: Cursor
-
-    nonisolated static let cursorDB = NSHomeDirectory()
-        + "/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
-
-    /// Returns [] when Cursor is not installed / not logged in, so it simply doesn't show.
-    nonisolated static func fetchCursor() async throws -> [Limit] {
-        guard FileManager.default.fileExists(atPath: cursorDB) else { return [] }
-        guard let raw = run("/usr/bin/sqlite3", ["-readonly", cursorDB,
-                "SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken'"]),
-              let token = String(data: raw, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty
-        else { return [] }
-        guard let userId = jwtUserId(token) else {
-            throw WidgetError.msg(L.t("Cursor: token không hợp lệ", "Cursor: invalid token"))
-        }
-        let cookie = "WorkosCursorSessionToken=\(userId)%3A%3A\(token)"
-
-        func get(_ url: String) async throws -> [String: Any] {
-            var req = URLRequest(url: URL(string: url)!)
-            req.setValue(cookie, forHTTPHeaderField: "Cookie")
-            req.setValue("https://cursor.com", forHTTPHeaderField: "Origin")
-            req.setValue("https://cursor.com/dashboard", forHTTPHeaderField: "Referer")
-            req.setValue("Mozilla/5.0 aiusage/1.0", forHTTPHeaderField: "User-Agent")
-            req.timeoutInterval = 15
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 401 || code == 403 {
-                throw WidgetError.msg(L.t("Cursor: phiên đăng nhập hết hạn — mở Cursor để đăng nhập lại",
-                                           "Cursor: session expired — open Cursor to log in again"))
-            }
-            guard code == 200, let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { throw WidgetError.msg("Cursor: HTTP \(code)") }
-            return obj
-        }
-
-        // New usage-based plans: percentage of the included plan usage this billing cycle.
-        if let summary = try? await get("https://cursor.com/api/usage-summary"),
-           let individual = summary["individualUsage"] as? [String: Any],
-           let plan = individual["plan"] as? [String: Any] {
-            let used: Double? = num(plan["totalPercentUsed"]) ?? {
-                guard let u = num(plan["used"]), let l = num(plan["limit"]), l > 0 else { return nil }
-                return u / l * 100
-            }()
-            if let used {
-                let end = (summary["billingCycleEnd"] as? String).flatMap(parseDate)
-                let title = L.t("Cursor (chu kỳ tháng)", "Cursor (monthly cycle)")
-                return [Limit(kind: .cursor, title: title, used: min(100, used), resetsAt: end)]
-            }
-        }
-
-        // Legacy request-based plans: fast requests used / max this month.
-        let usage = try await get("https://cursor.com/api/usage?user=\(userId)")
-        guard let gpt = usage["gpt-4"] as? [String: Any],
-              let n = num(gpt["numRequests"]), let max = num(gpt["maxRequestUsage"]), max > 0
-        else { throw WidgetError.msg(L.t("Cursor: không đọc được dữ liệu usage", "Cursor: couldn't read usage data")) }
-        let start = (usage["startOfMonth"] as? String).flatMap(parseDate)
-        let end = start.flatMap { Calendar.current.date(byAdding: .month, value: 1, to: $0) }
-        let title = L.t("Cursor (\(Int(n))/\(Int(max)) request)", "Cursor (\(Int(n))/\(Int(max)) requests)")
-        return [Limit(kind: .cursor, title: title, used: min(100, n / max * 100), resetsAt: end)]
-    }
-
-    /// Cursor JWT `sub` looks like "auth0|user_XXXX"; the cookie needs the part after "|".
-    nonisolated static func jwtUserId(_ jwt: String) -> String? {
-        let parts = jwt.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while b64.count % 4 != 0 { b64 += "=" }
-        guard let d = Data(base64Encoded: b64),
-              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let sub = obj["sub"] as? String else { return nil }
-        return sub.split(separator: "|").last.map(String.init)
-    }
-
-    // MARK: Helpers
-
-    nonisolated static func num(_ v: Any?) -> Double? {
-        if let d = v as? Double { return d }
-        if let i = v as? Int { return Double(i) }
-        if let s = v as? String { return Double(s) }
-        return nil
-    }
-
-    nonisolated static func run(_ exe: String, _ args: [String]) -> Data? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        guard (try? p.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return p.terminationStatus == 0 ? data : nil
-    }
-
-    nonisolated static func parseDate(_ s: String) -> Date? {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) { return d }
-        f.formatOptions = [.withInternetDateTime]
-        return f.date(from: s)
-    }
-}
-
-extension Result where Failure == Error {
-    init(catching body: () async throws -> Success) async {
-        do { self = .success(try await body()) } catch { self = .failure(error) }
-    }
 }
 
 // MARK: - Settings
@@ -674,7 +465,6 @@ enum Pref {
     static let alwaysOnTop = "alwaysOnTop"
     static let showMenuBar = "showMenuBar"
     static let panelTop = "panelTop"
-    static let showCursor = "showCursor"
     static let showTasks = "showTasks"
     static let showTokens = "showTokens"
     static let panelScreenID = "panelScreenID"
@@ -683,7 +473,6 @@ enum Pref {
     static let notifyReset = "notifyReset"
     static let notifyForecast = "notifyForecast"
     static let notifyTasks = "notifyTasks"
-    static let refreshInterval = "refreshInterval"
 }
 
 // MARK: - Localization
@@ -705,14 +494,11 @@ extension LimitKind {
         case .week: return L.t("Tuần (7 ngày)", "Weekly (7 days)")
         case .opus: return L.t("Tuần — Opus", "Weekly — Opus")
         case .sonnet: return L.t("Tuần — Sonnet", "Weekly — Sonnet")
-        case .cursor: return "Cursor"
         }
     }
 }
 
-/// Cursor's title carries dynamic, already-localized detail (billing cycle / request count)
-/// baked in at fetch time; the Claude kinds ignore the cached `title` and localize live.
-func displayTitle(_ l: Limit) -> String { l.kind == .cursor ? l.title : l.kind.localizedTitle }
+func displayTitle(_ l: Limit) -> String { l.kind.localizedTitle }
 
 /// Absolute reset time in GMT+7, e.g. "21:10 T2 28/09 (GMT+7)".
 func resetClock(_ date: Date?) -> String {
@@ -746,10 +532,8 @@ let claudeOrange = Color(red: 0.851, green: 0.467, blue: 0.341)
 /// Running-task badge green.
 let runningGreen = Color(red: 0.20, green: 0.78, blue: 0.35)
 
-/// Cursor ring: soft white, like its monochrome brand.
-let cursorWhite = Color(white: 0.92)
 
-func ringColor(_ kind: LimitKind) -> Color { kind == .cursor ? cursorWhite : claudeOrange }
+func ringColor(_ kind: LimitKind) -> Color { claudeOrange }
 
 /// Color by how much has been used: green → yellow → red.
 func severityColor(used: Double) -> Color {
@@ -810,29 +594,6 @@ struct ClaudeBurst: View {
     }
 }
 
-/// Cursor-style mark: hexagonal cube with one shaded facet.
-struct CursorMark: View {
-    var body: some View {
-        Canvas { ctx, size in
-            let w = size.width, h = size.height
-            let c = CGPoint(x: w / 2, y: h / 2)
-            let top = CGPoint(x: w / 2, y: 0), bot = CGPoint(x: w / 2, y: h)
-            let tl = CGPoint(x: w * 0.07, y: h * 0.25), bl = CGPoint(x: w * 0.07, y: h * 0.75)
-            let tr = CGPoint(x: w * 0.93, y: h * 0.25), br = CGPoint(x: w * 0.93, y: h * 0.75)
-            var hex = Path()
-            hex.addLines([top, tr, br, bot, bl, tl]); hex.closeSubpath()
-            ctx.fill(hex, with: .color(.white.opacity(0.35)))
-            var facet = Path()
-            facet.addLines([tl, tr, c]); facet.closeSubpath()
-            ctx.fill(facet, with: .color(.white))
-            var edges = Path()
-            edges.move(to: c); edges.addLine(to: bot)
-            ctx.stroke(hex, with: .color(.white), lineWidth: 1)
-            ctx.stroke(edges, with: .color(.white), lineWidth: 1)
-        }
-    }
-}
-
 struct LimitIcon: View {
     let kind: LimitKind
     var body: some View {
@@ -841,7 +602,6 @@ struct LimitIcon: View {
         case .week: Image(systemName: "calendar").font(.system(size: 9.5, weight: .medium))
         case .opus: Image(systemName: "crown").font(.system(size: 8.5, weight: .medium))
         case .sonnet: Image(systemName: "music.note").font(.system(size: 9.5, weight: .medium))
-        case .cursor: CursorMark().frame(width: 12, height: 12)
         }
     }
 }
@@ -1442,7 +1202,7 @@ enum SettingsMenu {
         activity += running.map { "▶ \($0.name)" }
         row(menu, L.t("🔥 Hôm nay", "🔥 Today"), "\(formatTokens(tk.total)) · ▶ \(running.count)", details: activity)
 
-        let errors = [store.error, store.cursorError].compactMap { $0 }
+        let errors = [store.error].compactMap { $0 }
         if !errors.isEmpty {
             submenu(menu, L.t("⚠︎ Có \(errors.count) lỗi", "⚠︎ \(errors.count) issue(s)")) { m in errors.forEach { info(m, $0) } }
         }
@@ -1463,7 +1223,6 @@ enum SettingsMenu {
             toggle(L.t("% còn lại thay vì đã dùng", "% remaining instead of used"), Pref.showRemaining)
             toggle(L.t("Token hôm nay", "Today's tokens"), Pref.showTokens) { SidePanel.shared.layout() }
             toggle(L.t("Số task đang chạy", "Running task count"), Pref.showTasks) { SidePanel.shared.layout() }
-            toggle("Cursor", Pref.showCursor) { store.recompose() }
             toggle(L.t("Icon trên menu bar", "Menu bar icon"), Pref.showMenuBar)
             toggle(L.t("Luôn nằm trên cửa sổ khác", "Always on top"), Pref.alwaysOnTop) { SidePanel.shared.applyLevel() }
             if NSScreen.screens.count > 1 {
@@ -1479,17 +1238,8 @@ enum SettingsMenu {
                 }
             }
             m.addItem(.separator())
-            submenu(m, L.t("Cập nhật limit mỗi", "Check limits every")) { im in
-                for sec in UsageStore.intervalChoices {
-                    let mins = Int(sec / 60)
-                    action(im, L.t("\(mins) phút", mins == 1 ? "1 minute" : "\(mins) minutes"),
-                           checked: store.interval == sec) {
-                        d.set(sec, forKey: Pref.refreshInterval)
-                        store.scheduleRefresh()
-                    }
-                }
-                im.addItem(.separator())
-                info(im, L.t("Gọi càng thưa càng ít bị giới hạn (429)", "Less often = fewer rate limits (429)"))
+            action(m, L.t("Kết nối Claude Code", "Connect Claude Code"), checked: store.allConnected) {
+                store.connectClaudeCode()
             }
             submenu(m, L.t("Thông báo", "Notifications")) { nm in
                 toggle2(nm, L.t("Limit chạm 80% / 95%", "Limit reaches 80% / 95%"), Pref.notifyLimits)
@@ -1625,7 +1375,7 @@ struct MenuPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("AI usage").font(.system(size: 13, weight: .bold))
-            ForEach([store.error, store.cursorError].compactMap { $0 }, id: \.self) { e in
+            ForEach([store.error].compactMap { $0 }, id: \.self) { e in
                 Text(e).font(.system(size: 11)).foregroundStyle(.red)
             }
             ForEach(store.limits) { l in
@@ -2285,6 +2035,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
+enum Main {
+    static func main() {
+        // Claude Code runs us as its status line; handle that before any UI starts.
+        if CommandLine.arguments.contains("--statusline") { Bridge.runStatusLine() }
+        if CommandLine.arguments.contains("--install-statusline") {
+            for (dir, st) in Bridge.installAll() { print(dir, st) }
+            exit(0)
+        }
+        AiUsageApp.main()
+    }
+}
+
 struct AiUsageApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ObservedObject private var store = UsageStore.shared
@@ -2297,7 +2059,6 @@ struct AiUsageApp: App {
             Pref.alwaysOnTop: true,
             Pref.showMenuBar: true,
             Pref.showRemaining: false,
-            Pref.showCursor: true,
             Pref.showTasks: true,
             Pref.showTokens: true,
             Pref.language: Lang.vi.rawValue,
@@ -2305,7 +2066,6 @@ struct AiUsageApp: App {
             Pref.notifyReset: true,
             Pref.notifyForecast: true,
             Pref.notifyTasks: true,
-            Pref.refreshInterval: 300.0,
         ])
     }
 
